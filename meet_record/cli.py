@@ -149,8 +149,37 @@ def _load_plugin_subcommands(group: click.Group) -> None:
 from . import __version__
 
 
+def _combined_version() -> str:
+    """Format a `meet --version` string mentioning both packages when present.
+
+    Example outputs:
+        meet 0.5.0 (meetscribe-record 0.1.0)
+        meet 0.1.0 (meetscribe-record 0.1.0; meetscribe-offline NOT installed)
+    """
+    record_v = __version__
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            offline_v = version("meetscribe-offline")
+        except PackageNotFoundError:
+            offline_v = None
+    except Exception:
+        offline_v = None
+
+    if offline_v:
+        return (
+            f"{offline_v} (meetscribe-offline {offline_v}; "
+            f"meetscribe-record {record_v})"
+        )
+    return (
+        f"{record_v} (meetscribe-record {record_v}; "
+        f"meetscribe-offline not installed — "
+        f"`pip install meetscribe-offline` for transcription/diarization)"
+    )
+
+
 @click.group()
-@click.version_option(version=__version__, prog_name="meet (meetscribe-record)")
+@click.version_option(version=_combined_version(), prog_name="meet")
 def main():
     """Meeting audio recorder.
 
