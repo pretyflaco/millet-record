@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meetscribe-record"
+version = "0.1.0"
+description = "Lightweight capture-only subset of meetscribe: record dual-channel meeting audio (mic + system) with no transcription/diarization/summarization deps."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [{name = "pretyflaco"}]
+keywords = [
+    "meeting",
+    "recording",
+    "audio",
+    "ffmpeg",
+    "pipewire",
+    "pulseaudio",
+    "scribe",
+    "thin-client",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
+]
+dependencies = [
+    "click>=8.0",
+    "numpy>=1.20",
+]
+
+[project.scripts]
+meet = "meet_record.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/pretyflaco/meetscribe-record"
+Repository = "https://github.com/pretyflaco/meetscribe-record"
+Issues = "https://github.com/pretyflaco/meetscribe-record/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["meet_record*"]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
