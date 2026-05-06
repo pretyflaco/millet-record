@@ -1,15 +1,21 @@
-// main.swift — meet-record-mac M3 prototype
+// main.swift — meet-record-mac M4
 //
-// Captures 5 seconds of system audio via Core Audio Process Tap, downmixes
-// to 16 kHz mono, and writes a stereo s16le 16 kHz WAV with that audio on
-// the right channel and zeros on the left.
+// Captures 5 seconds of dual-channel audio:
+//   - Microphone via AVAudioEngine input tap   → left channel (L)
+//   - System audio via Core Audio Process Tap  → right channel (R)
+// Both streams are downmixed to 16 kHz mono Float32, paired by a
+// free-running ring-buffer Mixer with ~20 ms drain, soft-clipped via
+// tanh, and written as a stereo s16le 16 kHz WAV.
 //
-// This is a minimal stepping stone. M4 adds the mic on the left channel;
-// M5 adds CLI parsing, signal handling, status-fd, and the q-byte stop
-// protocol that meet_record/capture.py expects.
+// Output contract is unchanged from M3 (stereo s16le 16 kHz WAV with
+// 44-byte standard header), only what's *in* the left channel changes:
+// M3 wrote zeros, M4 writes mic samples.
 //
-// Usage (M3):
+// Usage (M4):
 //   meet-record-mac <output.wav>
+//
+// CLI parsing, signal handling, q-byte stop protocol, status-fd, and
+// per-app capture selection all land in M5.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -17,7 +23,9 @@ import Foundation
 import AVFoundation
 import AudioToolbox
 
-// MARK: - Argument parsing (intentionally trivial in M3)
+// macOS 14.4 is enforced by Package.swift's .macOS("14.4") platform pin.
+
+// MARK: - Argument parsing (intentionally trivial in M4)
 
 let args = CommandLine.arguments
 guard args.count == 2 else {
@@ -26,14 +34,12 @@ guard args.count == 2 else {
 }
 let outputURL = URL(fileURLWithPath: args[1])
 
-// macOS 14.4 is enforced by Package.swift's .macOS("14.4") platform pin.
-
 // MARK: - Constants
 
 let outputSampleRate: Double = 16_000
-let outputChannels: UInt16 = 2  // L=mic (zeros in M3), R=system
+let outputChannels: UInt16 = 2  // L=mic, R=system
 
-// MARK: - WAV writer
+// MARK: - WAV writer + Mixer
 
 let writer: WavWriter
 do {
@@ -47,46 +53,43 @@ do {
     exit(1)
 }
 
-// MARK: - Process tap + AVAudioConverter pipeline
+let mixer = Mixer(writer: writer)
+mixer.start()
 
-// We receive system audio in the tap's native format (typically 44.1 or 48 kHz
-// float32 stereo). For M3 we mix down to mono and resample to 16 kHz using
-// AVAudioConverter, then interleave with a left-channel zero buffer.
+// MARK: - Process tap (system audio → right channel)
+
+// Reuse the M3 conversion path: tap delivers in its native format
+// (typically 44.1 / 48 kHz stereo float32); we downmix to 16 kHz mono and
+// push to mixer.pushSystem(...).
 
 let tap = ProcessTap()
-var converter: AVAudioConverter?
-var sourceFormat: AVAudioFormat?
+var sysConverter: AVAudioConverter?
+var sysSourceFormat: AVAudioFormat?
 
-let targetMonoFormat = AVAudioFormat(
+let monoTargetFormat = AVAudioFormat(
     commonFormat: .pcmFormatFloat32,
     sampleRate: outputSampleRate,
     channels: 1,
     interleaved: false
 )!
 
-let writeQueue = DispatchQueue(label: "tools.pretyflaco.meetrecordmac.write")
-var totalRightSamplesWritten: Int = 0
-
 func handleTapBuffer(_ bufferList: AudioBufferList, _ asbd: AudioStreamBasicDescription) {
-    // Lazily build the AVAudioFormat + converter once we know the tap's format.
-    if sourceFormat == nil {
+    if sysSourceFormat == nil {
         var asbdLocal = asbd
         guard let fmt = AVAudioFormat(streamDescription: &asbdLocal) else {
             FileHandle.standardError.write(Data("error: cannot construct AVAudioFormat from tap ASBD\n".utf8))
             return
         }
-        sourceFormat = fmt
-        converter = AVAudioConverter(from: fmt, to: targetMonoFormat)
-        if converter == nil {
-            FileHandle.standardError.write(Data("error: AVAudioConverter init failed\n".utf8))
+        sysSourceFormat = fmt
+        sysConverter = AVAudioConverter(from: fmt, to: monoTargetFormat)
+        if sysConverter == nil {
+            FileHandle.standardError.write(Data("error: AVAudioConverter init failed (system → 16 kHz mono)\n".utf8))
             return
         }
     }
+    guard let sourceFormat = sysSourceFormat,
+          let converter = sysConverter else { return }
 
-    guard let sourceFormat = sourceFormat,
-          let converter = converter else { return }
-
-    // Wrap the incoming AudioBufferList in an AVAudioPCMBuffer (no copy).
     var mutableList = bufferList
     let frameCapacity = AVAudioFrameCount(
         Int(mutableList.mBuffers.mDataByteSize) / Int(sourceFormat.streamDescription.pointee.mBytesPerFrame)
@@ -100,12 +103,11 @@ func handleTapBuffer(_ bufferList: AudioBufferList, _ asbd: AudioStreamBasicDesc
     ) else { return }
     inputBuffer.frameLength = frameCapacity
 
-    // Compute output capacity proportional to sample-rate ratio, with slack.
-    let ratio = targetMonoFormat.sampleRate / sourceFormat.sampleRate
+    let ratio = monoTargetFormat.sampleRate / sourceFormat.sampleRate
     let outFrameCapacity = AVAudioFrameCount(Double(frameCapacity) * ratio + 64)
 
     guard let outputBuffer = AVAudioPCMBuffer(
-        pcmFormat: targetMonoFormat,
+        pcmFormat: monoTargetFormat,
         frameCapacity: outFrameCapacity
     ) else { return }
 
@@ -128,59 +130,60 @@ func handleTapBuffer(_ bufferList: AudioBufferList, _ asbd: AudioStreamBasicDesc
 
     let outFrames = Int(outputBuffer.frameLength)
     if outFrames == 0 { return }
-
-    // Convert mono float32 → interleaved stereo s16 with zeros on left.
     guard let monoPtr = outputBuffer.floatChannelData?[0] else { return }
-    var stereoSamples = [Int16](repeating: 0, count: outFrames * 2)
-    for i in 0..<outFrames {
-        let s = monoPtr[i]
-        let clipped = max(-1.0, min(1.0, s))
-        let int16Sample = Int16(clipped * 32767.0)
-        stereoSamples[2 * i] = 0                  // L = mic placeholder (M4 fills this)
-        stereoSamples[2 * i + 1] = int16Sample    // R = system audio
-    }
 
-    writeQueue.sync {
-        do {
-            try stereoSamples.withUnsafeBufferPointer { ptr in
-                guard let base = ptr.baseAddress else { return }
-                try writer.writeSamples(base, count: stereoSamples.count)
-            }
-            totalRightSamplesWritten += outFrames
-        } catch {
-            FileHandle.standardError.write(Data("warn: WAV write failed: \(error)\n".utf8))
-        }
-    }
+    mixer.pushSystem(monoPtr, count: outFrames)
 }
-
-// MARK: - Run
 
 do {
     try tap.start(handler: handleTapBuffer)
 } catch {
     FileHandle.standardError.write(Data("error: failed to start tap: \(error)\n".utf8))
+    mixer.stopAndFlush()
     try? writer.close()
     exit(1)
 }
 
+// MARK: - Mic capture (mic → left channel)
+
+let mic = MicCapture(targetSampleRate: outputSampleRate)
+do {
+    // MicCapture.start is @MainActor because AVAudioEngine input setup
+    // must happen on the main thread. Top-level main.swift code already
+    // runs on the main thread, so MainActor.assumeIsolated's runtime
+    // check (Thread.isMainThread) succeeds without dispatching.
+    try MainActor.assumeIsolated {
+        try mic.start { samples, count in
+            mixer.pushMic(samples, count: count)
+        }
+    }
+} catch {
+    FileHandle.standardError.write(Data("error: failed to start mic capture: \(error)\n".utf8))
+    tap.stop()
+    mixer.stopAndFlush()
+    try? writer.close()
+    exit(1)
+}
+
+// MARK: - Run
+
 let captureSeconds: TimeInterval = 5.0
-FileHandle.standardError.write(Data("meet-record-mac M3: capturing \(Int(captureSeconds))s of system audio → \(outputURL.path)\n".utf8))
+FileHandle.standardError.write(Data(
+    "meet-record-mac M4: capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
+))
 
 Thread.sleep(forTimeInterval: captureSeconds)
 
+mic.stop()
 tap.stop()
+mixer.stopAndFlush()
 
-writeQueue.sync {
-    do {
-        try writer.close()
-    } catch {
-        FileHandle.standardError.write(Data("error: failed to close WAV: \(error)\n".utf8))
-        exit(1)
-    }
+do {
+    try writer.close()
+} catch {
+    FileHandle.standardError.write(Data("error: failed to close WAV: \(error)\n".utf8))
+    exit(1)
 }
 
-let durationSec = Double(totalRightSamplesWritten) / outputSampleRate
-FileHandle.standardError.write(Data(
-    "done: wrote \(totalRightSamplesWritten) frames (~\(String(format: "%.2f", durationSec))s) to \(outputURL.path)\n".utf8
-))
+FileHandle.standardError.write(Data("done: wrote \(outputURL.path)\n".utf8))
 exit(0)
