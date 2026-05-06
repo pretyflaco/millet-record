@@ -1,0 +1,52 @@
+name: mac-sidecar
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mac/**"
+      - ".github/workflows/mac.yml"
+  pull_request:
+    paths:
+      - "mac/**"
+      - ".github/workflows/mac.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mac
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          swift --version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test --parallel
+
+      - name: Locate binary
+        id: locate
+        run: |
+          BIN=$(swift build -c release --show-bin-path)/meet-record-mac
+          ls -la "$BIN"
+          file "$BIN"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Upload unsigned binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meet-record-mac-unsigned-${{ github.sha }}
+          path: ${{ steps.locate.outputs.bin }}
+          if-no-files-found: error
+          retention-days: 30
