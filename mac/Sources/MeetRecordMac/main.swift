@@ -34,10 +34,21 @@ guard args.count == 2 else {
 }
 let outputURL = URL(fileURLWithPath: args[1])
 
-// MARK: - Constants
+// MARK: - Constants + debug helper
 
 let outputSampleRate: Double = 16_000
 let outputChannels: UInt16 = 2  // L=mic, R=system
+
+// MEET_RECORD_MAC_DEBUG=1 enables per-callback frame-count logging.
+// Used to localize duration drift bugs without an external ffprobe round-trip.
+let DEBUG_LOGGING = ProcessInfo.processInfo.environment["MEET_RECORD_MAC_DEBUG"] != nil
+
+@inline(__always)
+func debugLog(_ msg: @autoclosure () -> String) {
+    if DEBUG_LOGGING {
+        FileHandle.standardError.write(Data(msg().utf8))
+    }
+}
 
 // MARK: - WAV writer + Mixer
 
@@ -133,6 +144,8 @@ func handleTapBuffer(_ bufferList: AudioBufferList, _ asbd: AudioStreamBasicDesc
     guard let monoPtr = outputBuffer.floatChannelData?[0] else { return }
 
     mixer.pushSystem(monoPtr, count: outFrames)
+
+    debugLog("tap: outFrames=\(outFrames) cum=\(mixer.sysPushed) inFrames=\(frameCapacity) inFmt=\(sourceFormat.sampleRate)Hz/\(sourceFormat.channelCount)ch\n")
 }
 
 do {
@@ -155,6 +168,7 @@ do {
     try MainActor.assumeIsolated {
         try mic.start { samples, count in
             mixer.pushMic(samples, count: count)
+            debugLog("mic: outFrames=\(count) cum=\(mixer.micPushed)\n")
         }
     }
 } catch {
@@ -185,5 +199,20 @@ do {
     exit(1)
 }
 
-FileHandle.standardError.write(Data("done: wrote \(outputURL.path)\n".utf8))
+// Restore the M3-style "done:" line and extend it with push/emit counters
+// so duration drift is visible from the run output alone (no ffprobe needed).
+//
+// Interpretation guide for future debugging:
+//   paired = mic_push  → mic is the rate driver (rare)
+//   paired = sys_push  → sys is the rate driver (typical when mic is silent)
+//   paired > max(mic_push, sys_push)  → mixer is double-counting (bug)
+//   paired ≈ wall_clock * 16000  → recording is correctly real-time
+let pairedFrames = mixer.framesEmitted
+let durationSec = Double(pairedFrames) / outputSampleRate
+let summary = String(
+    format: "done: wrote %d paired frames (~%.2fs) to %@\n  push counters: mic=%d sys=%d\n  emit counter:  paired=%d\n",
+    pairedFrames, durationSec, outputURL.path,
+    mixer.micPushed, mixer.sysPushed, pairedFrames
+)
+FileHandle.standardError.write(Data(summary.utf8))
 exit(0)

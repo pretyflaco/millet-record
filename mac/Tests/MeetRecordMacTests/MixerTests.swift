@@ -108,8 +108,7 @@ final class MixerTests: XCTestCase {
         sys.withUnsafeBufferPointer { ptr in mixer.pushSystem(ptr.baseAddress!, count: n) }
 
         mixer.stopAndFlush()
-        // Allow async write queue to drain.
-        Thread.sleep(forTimeInterval: 0.1)
+        mixer.waitForWritesToDrain()
         try writer.close()
 
         let data = try Data(contentsOf: url)
@@ -125,14 +124,22 @@ final class MixerTests: XCTestCase {
             XCTAssertEqual(l, expectedMic, "Frame \(i) L (mic) wrong")
             XCTAssertEqual(r, expectedSys, "Frame \(i) R (system) wrong")
         }
+
+        XCTAssertEqual(mixer.micPushed, n)
+        XCTAssertEqual(mixer.sysPushed, n)
+        XCTAssertEqual(mixer.framesEmitted, n)
     }
 
-    /// If one channel is shorter, `stopAndFlush` zero-pads it so we don't
-    /// drop real audio from the longer side. We push 50 mic samples and
-    /// 200 system samples; expect 200 paired frames where the first 50 L
-    /// have the mic value and the last 150 L are zero-padded.
-    func testStopAndFlushZeroPadsShorterChannel() throws {
-        let url = tmpURL("padded.wav")
+    /// If one channel is shorter at flush time, we **truncate to min** so we
+    /// don't write a chunk of zero-padded silence at the boundary. Drops at
+    /// most one drain-interval (~20 ms) of the over-running channel. This
+    /// addresses the end-of-stream "deformation" @patternn flagged in M4
+    /// review.
+    ///
+    /// Push 50 mic + 200 sys samples; expect 50 paired frames in the WAV
+    /// (the over-running 150 sys samples are dropped).
+    func testStopAndFlushTruncatesToShorterChannel() throws {
+        let url = tmpURL("truncated.wav")
         let writer = try WavWriter(url: url, sampleRate: 16_000, channels: 2)
         let mixer = Mixer(writer: writer)
 
@@ -145,33 +152,25 @@ final class MixerTests: XCTestCase {
         sys.withUnsafeBufferPointer { ptr in mixer.pushSystem(ptr.baseAddress!, count: sys.count) }
 
         mixer.stopAndFlush()
-        Thread.sleep(forTimeInterval: 0.1)
+        mixer.waitForWritesToDrain()
         try writer.close()
 
         let data = try Data(contentsOf: url)
-        XCTAssertEqual(data.count, 44 + 200 * 4)
+        XCTAssertEqual(data.count, 44 + 50 * 4,
+                       "Flush should write min(mic.count, sys.count) = 50 paired frames, not max")
 
         let expectedMic = SoftClip.toInt16(micVal)
         let expectedSys = SoftClip.toInt16(sysVal)
 
-        // FloatRingBuffer is a single-producer FIFO from each side; pop
-        // returns head-first, so the first 50 frames have the real mic
-        // value and the last 150 are zero-padded.
         for i in 0..<50 {
             let off = 44 + i * 4
             let l = Int16(littleEndian: data.subdata(in: off..<(off + 2)).withUnsafeBytes { $0.load(as: Int16.self) })
-            XCTAssertEqual(l, expectedMic, "First 50 mic frames should preserve mic value (frame \(i))")
-        }
-        for i in 50..<200 {
-            let off = 44 + i * 4
-            let l = Int16(littleEndian: data.subdata(in: off..<(off + 2)).withUnsafeBytes { $0.load(as: Int16.self) })
-            XCTAssertEqual(l, 0, "Mic frames beyond the 50 supplied should be zero-padded (frame \(i))")
-        }
-        for i in 0..<200 {
-            let off = 44 + i * 4
             let r = Int16(littleEndian: data.subdata(in: (off + 2)..<(off + 4)).withUnsafeBytes { $0.load(as: Int16.self) })
-            XCTAssertEqual(r, expectedSys, "All 200 system frames should preserve system value (frame \(i))")
+            XCTAssertEqual(l, expectedMic, "Frame \(i) L (mic) should hold the real mic value")
+            XCTAssertEqual(r, expectedSys, "Frame \(i) R (sys) should hold the real sys value")
         }
+
+        XCTAssertEqual(mixer.framesEmitted, 50, "framesEmitted counter should match what was written")
     }
 
     /// Stopping with both buffers empty produces an empty (header-only)
@@ -181,10 +180,71 @@ final class MixerTests: XCTestCase {
         let writer = try WavWriter(url: url, sampleRate: 16_000, channels: 2)
         let mixer = Mixer(writer: writer)
         mixer.stopAndFlush()
-        Thread.sleep(forTimeInterval: 0.05)
+        mixer.waitForWritesToDrain()
         try writer.close()
 
         let data = try Data(contentsOf: url)
         XCTAssertEqual(data.count, 44, "Empty WAV must remain exactly 44 bytes")
+    }
+
+    /// `drainOnce` mid-stream MUST emit exactly `max(micAvail, sysAvail)`
+    /// paired frames per call — never more, never less. If the mixer ever
+    /// over-counts (the kind of bug we're chasing in M4.1's duration drift),
+    /// this test will catch it directly.
+    ///
+    /// Pushes 1000 sys + 100 mic; calls `drainOnce()` once. Expected: 1000
+    /// paired frames in the WAV with the first 100 L holding the real mic
+    /// value and the last 900 L being zero-padded (mid-stream behavior is
+    /// pad-not-truncate; only flush truncates). All 1000 R hold sys value.
+    /// Total emit counter = 1000, push counters = mic=100, sys=1000.
+    func testDrainOnceProducesExactlyMaxAvailableFrames() throws {
+        let url = tmpURL("drain-once.wav")
+        let writer = try WavWriter(url: url, sampleRate: 16_000, channels: 2)
+        let mixer = Mixer(writer: writer)
+        // Don't call mixer.start() — we drive drainOnce() manually so the
+        // test is deterministic without timer races.
+
+        let micVal: Float = 0.3
+        let sysVal: Float = 0.4
+        let mic = [Float](repeating: micVal, count: 100)
+        let sys = [Float](repeating: sysVal, count: 1000)
+
+        mic.withUnsafeBufferPointer { ptr in mixer.pushMic(ptr.baseAddress!, count: mic.count) }
+        sys.withUnsafeBufferPointer { ptr in mixer.pushSystem(ptr.baseAddress!, count: sys.count) }
+
+        mixer.drainOnce()
+        mixer.waitForWritesToDrain()
+
+        // A second drainOnce on now-empty buffers must emit nothing.
+        mixer.drainOnce()
+        mixer.waitForWritesToDrain()
+        try writer.close()
+
+        XCTAssertEqual(mixer.micPushed, 100, "micPushed counter")
+        XCTAssertEqual(mixer.sysPushed, 1000, "sysPushed counter")
+        XCTAssertEqual(mixer.framesEmitted, 1000,
+                       "framesEmitted should equal max(micAvail, sysAvail) from the single non-empty drainOnce, NOT 1100 or any other multiple")
+
+        let data = try Data(contentsOf: url)
+        XCTAssertEqual(data.count, 44 + 1000 * 4, "WAV body must be exactly 1000 paired frames")
+
+        let expectedMic = SoftClip.toInt16(micVal)
+        let expectedSys = SoftClip.toInt16(sysVal)
+
+        for i in 0..<100 {
+            let off = 44 + i * 4
+            let l = Int16(littleEndian: data.subdata(in: off..<(off + 2)).withUnsafeBytes { $0.load(as: Int16.self) })
+            XCTAssertEqual(l, expectedMic, "Frame \(i) L should be real mic")
+        }
+        for i in 100..<1000 {
+            let off = 44 + i * 4
+            let l = Int16(littleEndian: data.subdata(in: off..<(off + 2)).withUnsafeBytes { $0.load(as: Int16.self) })
+            XCTAssertEqual(l, 0, "Frame \(i) L should be zero-padded (mid-stream pad behavior)")
+        }
+        for i in 0..<1000 {
+            let off = 44 + i * 4
+            let r = Int16(littleEndian: data.subdata(in: (off + 2)..<(off + 4)).withUnsafeBytes { $0.load(as: Int16.self) })
+            XCTAssertEqual(r, expectedSys, "Frame \(i) R should be real sys")
+        }
     }
 }

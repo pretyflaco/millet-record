@@ -94,6 +94,28 @@ final class Mixer {
     /// memory bounded but large enough to amortize lock + write overhead.
     let drainIntervalMs: Int
 
+    // Diagnostic counters. Reads/writes are protected by `countersLock`.
+    // Used by main.swift to print push/emit totals at end of run, so a
+    // duration drift surfaces from logs alone instead of requiring an
+    // external `ffprobe` round-trip.
+    private let countersLock = NSLock()
+    private var _micPushed: Int = 0
+    private var _sysPushed: Int = 0
+    private var _framesEmitted: Int = 0
+
+    var micPushed: Int {
+        countersLock.lock(); defer { countersLock.unlock() }
+        return _micPushed
+    }
+    var sysPushed: Int {
+        countersLock.lock(); defer { countersLock.unlock() }
+        return _sysPushed
+    }
+    var framesEmitted: Int {
+        countersLock.lock(); defer { countersLock.unlock() }
+        return _framesEmitted
+    }
+
     init(writer: WavWriter, drainIntervalMs: Int = 20) {
         self.writer = writer
         self.drainIntervalMs = drainIntervalMs
@@ -101,10 +123,16 @@ final class Mixer {
 
     func pushMic(_ src: UnsafePointer<Float>, count: Int) {
         micBuffer.push(src, count: count)
+        countersLock.lock()
+        _micPushed += count
+        countersLock.unlock()
     }
 
     func pushSystem(_ src: UnsafePointer<Float>, count: Int) {
         sysBuffer.push(src, count: count)
+        countersLock.lock()
+        _sysPushed += count
+        countersLock.unlock()
     }
 
     /// Start the periodic drain timer.
@@ -121,29 +149,33 @@ final class Mixer {
         self.timer = t
     }
 
-    /// Stop the timer and flush whatever's buffered, zero-padding the
-    /// shorter channel to match.
+    /// Stop the timer and flush whatever's buffered, **truncating to the
+    /// shorter channel** so we never write a chunk of zero-padded silence
+    /// at the boundary. Cost: drops at most one drain-interval worth of
+    /// the over-running channel (~20 ms by default). Without this, the
+    /// final emit could pair real audio against zeros, producing the
+    /// audible end-of-stream artifact that @patternn flagged in M4
+    /// (PR #3 review).
     func stopAndFlush() {
         timer?.cancel()
         timer = nil
-        // One final drain pairs whatever's left in the larger buffer with
-        // zeros on the shorter side. We deliberately zero-pad the shorter
-        // channel here — the alternative (truncating the longer channel)
-        // would discard real audio.
         let mic = micBuffer.drainAll()
         let sys = sysBuffer.drainAll()
-        let n = max(mic.count, sys.count)
+        let n = min(mic.count, sys.count)
         if n == 0 { return }
-        emit(micFrames: padded(mic, to: n), sysFrames: padded(sys, to: n))
+        emit(micFrames: Array(mic.prefix(n)), sysFrames: Array(sys.prefix(n)))
     }
 
-    // MARK: - Private
+    // MARK: - Internal (also exposed for unit tests)
 
     /// One pass of the drain timer: pair whatever's available now,
     /// zero-padding the channel that hasn't produced enough yet only when
     /// at least one side has data. While both sides are still empty we
     /// emit nothing, avoiding silent zero-pollution at startup.
-    private func drainOnce() {
+    ///
+    /// Internal (not private) so MixerTests can invoke it deterministically
+    /// without spinning up the live DispatchSourceTimer.
+    func drainOnce() {
         let micAvail = micBuffer.available
         let sysAvail = sysBuffer.available
         if micAvail == 0 && sysAvail == 0 { return }
@@ -175,6 +207,10 @@ final class Mixer {
             interleaved[2 * i + 1] = SoftClip.toInt16(sysFrames[i])  // R = system
         }
 
+        countersLock.lock()
+        _framesEmitted += n
+        countersLock.unlock()
+
         writeQueue.async { [writer] in
             do {
                 try interleaved.withUnsafeBufferPointer { ptr in
@@ -185,5 +221,12 @@ final class Mixer {
                 FileHandle.standardError.write(Data("warn: WAV write failed: \(error)\n".utf8))
             }
         }
+    }
+
+    /// Synchronization barrier on the write queue. Tests use this to
+    /// guarantee all `emit`-triggered writes have flushed to disk before
+    /// they read back the WAV file.
+    func waitForWritesToDrain() {
+        writeQueue.sync { }
     }
 }
