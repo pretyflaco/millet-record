@@ -102,6 +102,8 @@ final class Mixer {
     private var _micPushed: Int = 0
     private var _sysPushed: Int = 0
     private var _framesEmitted: Int = 0
+    private var _micReady: Bool = false
+    private var _sysDiscardedAtMicReady: Int = 0
 
     var micPushed: Int {
         countersLock.lock(); defer { countersLock.unlock() }
@@ -114,6 +116,10 @@ final class Mixer {
     var framesEmitted: Int {
         countersLock.lock(); defer { countersLock.unlock() }
         return _framesEmitted
+    }
+    var sysDiscardedAtMicReady: Int {
+        countersLock.lock(); defer { countersLock.unlock() }
+        return _sysDiscardedAtMicReady
     }
 
     init(writer: WavWriter, drainIntervalMs: Int = 20) {
@@ -132,6 +138,33 @@ final class Mixer {
         sysBuffer.push(src, count: count)
         countersLock.lock()
         _sysPushed += count
+        countersLock.unlock()
+    }
+
+    /// Called once when the microphone path delivers its first non-empty
+    /// buffer. Drains and discards everything currently buffered on the
+    /// system side so subsequent paired emits have zero pre-mic system
+    /// audio in front of them.
+    ///
+    /// Without this, the system tap accumulates ~2 s of audio during the
+    /// AVAudioEngine cold-start window. After mic warms up, the
+    /// `min(...)`-semantics drain in `drainOnce` would pair fresh mic
+    /// samples with 2-second-old system samples, yielding a constant 2 s
+    /// A/V offset for the rest of the recording.
+    ///
+    /// Idempotent: subsequent calls are no-ops.
+    func markMicReady() {
+        countersLock.lock()
+        if _micReady {
+            countersLock.unlock()
+            return
+        }
+        _micReady = true
+        countersLock.unlock()
+
+        let dropped = sysBuffer.drainAll()
+        countersLock.lock()
+        _sysDiscardedAtMicReady = dropped.count
         countersLock.unlock()
     }
 
@@ -168,30 +201,31 @@ final class Mixer {
 
     // MARK: - Internal (also exposed for unit tests)
 
-    /// One pass of the drain timer: pair whatever's available now,
-    /// zero-padding the channel that hasn't produced enough yet only when
-    /// at least one side has data. While both sides are still empty we
-    /// emit nothing, avoiding silent zero-pollution at startup.
+    /// One pass of the drain timer: emit `min(micAvail, sysAvail)` paired
+    /// frames so each output frame represents real audio time on **both**
+    /// channels. If either side hasn't caught up, the faster side waits in
+    /// its buffer; we never zero-pad mid-stream.
+    ///
+    /// Earlier versions used `max(...)` and zero-padded the lagging
+    /// channel. That inflated the recording timeline by the producer
+    /// burstiness ratio (~1.8–2.1× in practice on Apple Silicon, where
+    /// the mic delivers in ~100 ms bursts and the system tap delivers in
+    /// ~10 ms slices). Patternn's M4.1 smoke test surfaced this as the
+    /// 9 s vs 5 s drift; M4.2 fixed it by switching to `min(...)`.
     ///
     /// Internal (not private) so MixerTests can invoke it deterministically
     /// without spinning up the live DispatchSourceTimer.
     func drainOnce() {
         let micAvail = micBuffer.available
         let sysAvail = sysBuffer.available
-        if micAvail == 0 && sysAvail == 0 { return }
+        // Either side empty → emit nothing this tick. The faster side's
+        // samples stay buffered until the slower side catches up.
+        if micAvail == 0 || sysAvail == 0 { return }
 
-        let n = max(micAvail, sysAvail)
+        let n = min(micAvail, sysAvail)
         let mic = micBuffer.pop(maxCount: n)
         let sys = sysBuffer.pop(maxCount: n)
-        emit(micFrames: padded(mic, to: n), sysFrames: padded(sys, to: n))
-    }
-
-    private func padded(_ src: [Float], to n: Int) -> [Float] {
-        if src.count == n { return src }
-        var out = src
-        out.reserveCapacity(n)
-        for _ in src.count..<n { out.append(0) }
-        return out
+        emit(micFrames: mic, sysFrames: sys)
     }
 
     /// Convert the two mono streams to interleaved s16 with tanh soft-clip

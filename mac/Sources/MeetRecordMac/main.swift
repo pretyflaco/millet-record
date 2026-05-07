@@ -159,6 +159,14 @@ do {
 
 // MARK: - Mic capture (mic → left channel)
 
+// Track when the first mic callback fires (relative to tap-start) so the
+// "done:" summary line can report mic warmup latency. AVAudioEngine input
+// has a known cold-start delay (~1-2 s on Apple Silicon); the value lets
+// us confirm Mixer.markMicReady() is being called at a sensible time.
+let recordingStartedAt = Date()
+let micFirstSeenLock = NSLock()
+var micFirstSeenAt: TimeInterval? = nil
+
 let mic = MicCapture(targetSampleRate: outputSampleRate)
 do {
     // MicCapture.start is @MainActor because AVAudioEngine input setup
@@ -167,6 +175,18 @@ do {
     // check (Thread.isMainThread) succeeds without dispatching.
     try MainActor.assumeIsolated {
         try mic.start { samples, count in
+            // First non-empty mic delivery: discard any pre-mic system
+            // audio that accumulated during AVAudioEngine cold start.
+            // markMicReady() is idempotent and lock-checked, so calling
+            // it on every callback is cheap after the first.
+            if count > 0 {
+                micFirstSeenLock.lock()
+                if micFirstSeenAt == nil {
+                    micFirstSeenAt = Date().timeIntervalSince(recordingStartedAt)
+                }
+                micFirstSeenLock.unlock()
+                mixer.markMicReady()
+            }
             mixer.pushMic(samples, count: count)
             debugLog("mic: outFrames=\(count) cum=\(mixer.micPushed)\n")
         }
@@ -183,7 +203,7 @@ do {
 
 let captureSeconds: TimeInterval = 5.0
 FileHandle.standardError.write(Data(
-    "meet-record-mac M4: capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
+    "meet-record-mac M4.2: capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
 ))
 
 Thread.sleep(forTimeInterval: captureSeconds)
@@ -203,16 +223,33 @@ do {
 // so duration drift is visible from the run output alone (no ffprobe needed).
 //
 // Interpretation guide for future debugging:
-//   paired = mic_push  → mic is the rate driver (rare)
-//   paired = sys_push  → sys is the rate driver (typical when mic is silent)
-//   paired > max(mic_push, sys_push)  → mixer is double-counting (bug)
-//   paired ≈ wall_clock * 16000  → recording is correctly real-time
+//   paired ≈ wall_clock * 16000          → recording is correctly real-time
+//   paired ≈ min(mic_push, sys_push)     → drainOnce is using min-semantics correctly
+//   paired ≫ min(mic_push, sys_push)     → mixer is over-emitting (was the M4 bug:
+//                                          old max(...) + zero-pad inflated by ~2×)
+//   sys_discarded > 0                    → markMicReady() ran; pre-mic system audio
+//                                          was dropped (expected: AVAudioEngine has
+//                                          ~1-2 s cold-start latency on Apple Silicon)
 let pairedFrames = mixer.framesEmitted
 let durationSec = Double(pairedFrames) / outputSampleRate
+micFirstSeenLock.lock()
+let micWarmupSec = micFirstSeenAt
+micFirstSeenLock.unlock()
+let micWarmupStr = micWarmupSec.map { String(format: "%.3fs", $0) } ?? "never"
 let summary = String(
-    format: "done: wrote %d paired frames (~%.2fs) to %@\n  push counters: mic=%d sys=%d\n  emit counter:  paired=%d\n",
+    format: """
+    done: wrote %d paired frames (~%.2fs) to %@
+      push counters:    mic=%d sys=%d
+      emit counter:     paired=%d
+      mic_first_seen:   %@
+      sys_discarded:    %d  (pre-mic system audio dropped by markMicReady)
+
+    """,
     pairedFrames, durationSec, outputURL.path,
-    mixer.micPushed, mixer.sysPushed, pairedFrames
+    mixer.micPushed, mixer.sysPushed,
+    pairedFrames,
+    micWarmupStr,
+    mixer.sysDiscardedAtMicReady
 )
 FileHandle.standardError.write(Data(summary.utf8))
 exit(0)

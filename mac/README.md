@@ -9,15 +9,19 @@ the repo root).
 
 ## Status
 
-**M4 prototype.** Captures 5 seconds of dual-channel audio:
+**M4.2 prototype.** Captures 5 seconds of dual-channel audio:
 
 - Microphone via `AVAudioEngine` input tap → **left** channel
 - System audio via Core Audio Process Tap → **right** channel
 
 Both streams are downmixed to 16 kHz mono Float32, paired by a
-free-running ring-buffer mixer (`Mixer.swift`) with ~20 ms drain interval,
-soft-clipped via `tanh` (`SoftClip.swift`) to avoid full-scale saturation,
-and written as a stereo s16le 16 kHz WAV.
+free-running ring-buffer mixer (`Mixer.swift`) using `min(micAvail, sysAvail)`
+semantics so neither channel zero-pads mid-stream, soft-clipped via `tanh`
+(`SoftClip.swift`) to avoid full-scale saturation, and written as a stereo
+s16le 16 kHz WAV. On first mic delivery the mixer's `markMicReady()`
+discards any pre-mic system audio that accumulated during AVAudioEngine
+cold-start (~1–2 s on Apple Silicon), so paired emits begin from a
+common "now" instead of carrying a constant sys-leads-mic offset.
 
 CLI parsing, signal handling, the q-byte stop protocol, and per-app
 capture selection all land in M5.
