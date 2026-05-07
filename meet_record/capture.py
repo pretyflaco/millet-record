@@ -317,8 +317,8 @@ class RecordingSession:
             "1",
             "-f",
             "pulse",
-            "-channel_layout",
-            "mono",
+            "-ac",
+            "1",
             "-i",
             self.mic_source,
             # System audio monitor input (wall-clock timestamps)
@@ -326,8 +326,8 @@ class RecordingSession:
             "1",
             "-f",
             "pulse",
-            "-channel_layout",
-            "mono",
+            "-ac",
+            "1",
             "-i",
             self._actual_monitor,
             # Merge into 2-channel stereo (left=mic, right=system)
