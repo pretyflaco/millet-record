@@ -13,8 +13,9 @@ final class MicGainTests: XCTestCase {
     func testUnityGainIsNoOp() {
         var samples: [Float] = [-0.5, -0.1, 0.0, 0.1, 0.5, 0.99, -1.0]
         let original = samples
+        let count = samples.count
         samples.withUnsafeMutableBufferPointer { ptr in
-            MicGain.applyInPlace(ptr.baseAddress!, count: samples.count, gain: 1.0)
+            MicGain.applyInPlace(ptr.baseAddress!, count: count, gain: 1.0)
         }
         XCTAssertEqual(samples, original, "gain=1.0 must be bit-identical (no-op early return)")
     }
@@ -30,8 +31,9 @@ final class MicGainTests: XCTestCase {
 
     func testScalesEachSampleByGain() {
         var samples: [Float] = [0.1, -0.2, 0.05, -0.5]
+        let count = samples.count
         samples.withUnsafeMutableBufferPointer { ptr in
-            MicGain.applyInPlace(ptr.baseAddress!, count: samples.count, gain: 4.0)
+            MicGain.applyInPlace(ptr.baseAddress!, count: count, gain: 4.0)
         }
         // gain=4 doubles 0.1 → 0.4 etc. Tolerance for float32 multiplication.
         let expected: [Float] = [0.4, -0.8, 0.2, -2.0]
@@ -46,8 +48,9 @@ final class MicGainTests: XCTestCase {
     /// negate that.
     func testGainAllowsHotInputsForDownstreamSoftClip() {
         var samples: [Float] = [0.5, 0.8, -0.7]
+        let count = samples.count
         samples.withUnsafeMutableBufferPointer { ptr in
-            MicGain.applyInPlace(ptr.baseAddress!, count: samples.count, gain: 8.0)
+            MicGain.applyInPlace(ptr.baseAddress!, count: count, gain: 8.0)
         }
         // Output is intentionally outside [-1, +1]. The soft-clip stage
         // (called later in Mixer) maps these through tanh.
