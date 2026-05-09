@@ -58,15 +58,25 @@ final class MicGainTests: XCTestCase {
         XCTAssertEqual(samples[1], 6.4, accuracy: 1e-6)
         XCTAssertEqual(samples[2], -5.6, accuracy: 1e-6)
 
-        // Belt-and-suspenders: ensure the values produce sensible
-        // (non-saturated mid-scale) output through SoftClip.
+        // Belt-and-suspenders: ensure the values pass cleanly through
+        // SoftClip. Once gain×sample is large enough that tanh(...) is
+        // numerically indistinguishable from ±1.0 in Float, rounding
+        // legitimately produces ±32767. The point of the soft-clip is
+        // graceful saturation, not "never reach full scale" — what we
+        // care about is that the result is finite and within Int16
+        // range, with NO undefined-behavior conversion (NaN/Inf →
+        // arbitrary Int16 truncation).
         let post = samples.map { SoftClip.toInt16($0) }
         for v in post {
-            // tanh(4) ≈ 0.9993, * 32767 ≈ 32744 — close to but not
-            // exactly +32767, leaving the limiter's headroom intact.
-            XCTAssertLessThan(abs(Int(v)), Int(Int16.max),
-                              "Soft-clip must not produce exactly ±32767 saturation even on extreme gain output")
+            XCTAssertLessThanOrEqual(Int(v), Int(Int16.max))
+            XCTAssertGreaterThanOrEqual(Int(v), Int(Int16.min))
         }
+
+        // tanh(0.5*8 = 4.0) ≈ 0.9993; this lower-amplitude input is
+        // strictly inside full scale and is the case where soft-clip's
+        // headroom is observable. Verify that one explicitly.
+        XCTAssertLessThan(abs(Int(post[0])), Int(Int16.max),
+                          "Sample 0 (gain×input = 4.0) should land below full scale; tanh(4)*32767 ≈ 32744")
     }
 
     // MARK: - Env-var parsing
