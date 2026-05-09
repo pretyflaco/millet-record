@@ -50,6 +50,14 @@ func debugLog(_ msg: @autoclosure () -> String) {
     }
 }
 
+// MEET_RECORD_MAC_MIC_GAIN=<float> applies a fixed software gain on the
+// mic path before tanh soft-clip. Default 1.0 (no-op; preserves M4.2
+// behavior). DIAGNOSTIC ONLY — used to localize the M4.5 mic-vs-system
+// level gap @patternn observed (~22 dB on Apple M1 internal mic). The
+// eventual M4.5 fix may or may not bake a non-unity default into
+// MicCapture; that decision is on data, not preempted here.
+let micGain = MicGain.gainFromEnvironment(ProcessInfo.processInfo.environment)
+
 // MARK: - WAV writer + Mixer
 
 let writer: WavWriter
@@ -167,7 +175,7 @@ let recordingStartedAt = Date()
 let micFirstSeenLock = NSLock()
 var micFirstSeenAt: TimeInterval? = nil
 
-let mic = MicCapture(targetSampleRate: outputSampleRate)
+let mic = MicCapture(targetSampleRate: outputSampleRate, gain: micGain)
 do {
     // MicCapture.start is @MainActor because AVAudioEngine input setup
     // must happen on the main thread. Top-level main.swift code already
@@ -181,10 +189,17 @@ do {
             // it on every callback is cheap after the first.
             if count > 0 {
                 micFirstSeenLock.lock()
-                if micFirstSeenAt == nil {
+                let isFirst = micFirstSeenAt == nil
+                if isFirst {
                     micFirstSeenAt = Date().timeIntervalSince(recordingStartedAt)
                 }
                 micFirstSeenLock.unlock()
+                if isFirst {
+                    // M4.5: log mic source intel on the first delivery.
+                    // Static fields, so once is sufficient — keeps log volume
+                    // bounded while still surfacing the format every run.
+                    debugLog("mic_input: rate=\(mic.nativeSampleRate)Hz channels=\(mic.nativeChannelCount) inputVolume=\(mic.inputNodeVolume) gain=\(mic.gain)\n")
+                }
                 mixer.markMicReady()
             }
             mixer.pushMic(samples, count: count)
@@ -203,7 +218,7 @@ do {
 
 let captureSeconds: TimeInterval = 5.0
 FileHandle.standardError.write(Data(
-    "meet-record-mac M4.2: capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
+    "meet-record-mac M4.5: capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
 ))
 
 Thread.sleep(forTimeInterval: captureSeconds)
@@ -243,13 +258,15 @@ let summary = String(
       emit counter:     paired=%d
       mic_first_seen:   %@
       sys_discarded:    %d  (pre-mic system audio dropped by markMicReady)
+      mic_input:        rate=%.1fHz channels=%d inputVolume=%.3f gain=%.3f
 
     """,
     pairedFrames, durationSec, outputURL.path,
     mixer.micPushed, mixer.sysPushed,
     pairedFrames,
     micWarmupStr,
-    mixer.sysDiscardedAtMicReady
+    mixer.sysDiscardedAtMicReady,
+    mic.nativeSampleRate, mic.nativeChannelCount, mic.inputNodeVolume, mic.gain
 )
 FileHandle.standardError.write(Data(summary.utf8))
 exit(0)

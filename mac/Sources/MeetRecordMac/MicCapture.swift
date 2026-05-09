@@ -27,13 +27,33 @@ final class MicCapture {
 
     private let engine = AVAudioEngine()
     private let targetSampleRate: Double
+
+    /// Diagnostic gain multiplier applied to each Float sample before the
+    /// caller's frame handler sees them. Default 1.0 (no-op). Set via
+    /// `MEET_RECORD_MAC_MIC_GAIN` env var in main.swift. Tracked under
+    /// M4.5: the input level gap @patternn observed (mic ~22 dB below sys)
+    /// is being investigated; this is the knob the investigation uses to
+    /// localize the gap, not a baked-in fix.
+    let gain: Float
+
     private var converter: AVAudioConverter?
     private var sourceFormat: AVAudioFormat?
     private var targetFormat: AVAudioFormat?
     private var handler: FrameHandler?
 
-    init(targetSampleRate: Double = 16_000) {
+    /// Native rate of the AVAudioEngine input node (set on `start`).
+    /// Exposed so main.swift can include it in the `done:` summary.
+    private(set) var nativeSampleRate: Double = 0
+    /// Native channel count of the AVAudioEngine input node.
+    private(set) var nativeChannelCount: UInt32 = 0
+    /// `engine.inputNode.volume` snapshot at start. Useful for telling
+    /// "macOS input slider is low" apart from "mic gain is intrinsically
+    /// low at unity volume."
+    private(set) var inputNodeVolume: Float = 0
+
+    init(targetSampleRate: Double = 16_000, gain: Float = 1.0) {
         self.targetSampleRate = targetSampleRate
+        self.gain = gain
     }
 
     /// Start capture. Must be called on the main thread (AVAudioEngine
@@ -48,6 +68,9 @@ final class MicCapture {
             throw MicCaptureError.engine("Input node returned invalid format: \(nativeFormat)")
         }
         self.sourceFormat = nativeFormat
+        self.nativeSampleRate = nativeFormat.sampleRate
+        self.nativeChannelCount = nativeFormat.channelCount
+        self.inputNodeVolume = input.volume
 
         guard let target = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -117,6 +140,12 @@ final class MicCapture {
         let outFrames = Int(out.frameLength)
         if outFrames == 0 { return }
         guard let monoPtr = out.floatChannelData?[0] else { return }
+
+        // Diagnostic mic-gain stage (M4.5). Default 1.0 → no-op. Applied
+        // pre-handler so the Mixer's tanh soft-clip catches any hot
+        // outputs gracefully, rather than producing harsh saturation.
+        MicGain.applyInPlace(monoPtr, count: outFrames, gain: gain)
+
         handler(monoPtr, outFrames)
     }
 }
