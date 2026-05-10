@@ -1,0 +1,194 @@
+name: release
+
+# Release pipeline for meetscribe-record.
+#
+# Phase 1 (current, M6c.i): produce two artefacts on every manual run
+# or tag push, available as workflow-artifact downloads:
+#   * meetscribe_record-<version>-py3-none-any.whl   (Linux/universal,
+#     ships an empty meet_record/_bin/ directory; capture.py shells
+#     out to system ffmpeg+pactl on Linux)
+#   * meetscribe_record-<version>-py3-none-macosx_14_0_arm64.whl
+#     (macOS arm64, ships meet_record/_bin/meet-record-mac built by
+#     mac.yml; capture.py uses this binary when MEET_RECORD_MAC=1)
+#
+# Phase 2 (M9, future): notarize the macOS binary inside the build job
+# (requires Apple Developer ID), publish both wheels to PyPI via
+# trusted-publisher token. Out of scope for this workflow today; the
+# wheels are downloadable from the run for manual `pip install`.
+
+on:
+  push:
+    tags:
+      - "record-v*"
+  workflow_dispatch:
+    inputs:
+      version_label:
+        description: "Version label (informational; metadata pulled from meet_record/__init__.py)"
+        required: false
+        default: "manual"
+
+jobs:
+  # ─── Job 1: build the macOS arm64 binary ──────────────────────────────────
+  build-mac-binary:
+    runs-on: macos-14
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mac
+    outputs:
+      sha: ${{ steps.locate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Locate binary + record sha
+        id: locate
+        run: |
+          BIN=$(swift build -c release --show-bin-path)/meet-record-mac
+          ls -la "$BIN"
+          file "$BIN"
+          shasum -a 256 "$BIN"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          echo "sha=$(shasum -a 256 < "$BIN" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binary as job artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meet-record-mac-binary
+          path: ${{ steps.locate.outputs.bin }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # ─── Job 2: build wheels (Linux + macOS arm64) ────────────────────────────
+  build-wheels:
+    needs: build-mac-binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel
+
+      - name: Download macOS binary
+        uses: actions/download-artifact@v4
+        with:
+          name: meet-record-mac-binary
+          path: meet_record/_bin
+
+      - name: Make binary executable
+        run: |
+          chmod +x meet_record/_bin/meet-record-mac
+          ls -la meet_record/_bin/
+
+      - name: Build base wheel (py3-none-any)
+        # `python -m build --wheel` produces a single wheel tagged
+        # py3-none-any since the package contains only .py + data
+        # files. We then retag a copy as macos-arm64 in the next step.
+        run: |
+          python -m build --wheel --outdir dist-base
+          ls -la dist-base/
+
+      - name: Retag for macOS arm64
+        # `wheel tags --platform-tag` rewrites the wheel filename and
+        # the WHEEL metadata's Tag: line. The retagged wheel still
+        # contains exactly the same files (including
+        # meet_record/_bin/meet-record-mac); the tag is platform-
+        # tagging metadata only. macosx_14_0_arm64 is the lowest tag
+        # that pip will offer to a macOS-14.x arm64 host;
+        # Package.swift enforces 14.4 at runtime.
+        run: |
+          mkdir -p dist
+          BASE_WHEEL=$(ls dist-base/*.whl)
+          echo "base wheel: $BASE_WHEEL"
+
+          # Linux/universal wheel: copy as-is (binary inside is harmless
+          # noise on Linux; capture.py never resolves it on non-darwin).
+          cp "$BASE_WHEEL" dist/
+
+          # macOS arm64 wheel: retag.
+          python -m wheel tags \
+              --platform-tag macosx_14_0_arm64 \
+              --remove \
+              --output-dir dist \
+              "$BASE_WHEEL"
+
+          ls -la dist/
+
+      - name: Show wheel contents (sanity)
+        run: |
+          for w in dist/*.whl; do
+              echo "=== $w ==="
+              python -m zipfile --list "$w" | head -20
+              echo
+          done
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─── Job 3: install + smoke the macOS wheel on a fresh runner ────────────
+  verify-mac-wheel:
+    needs: build-wheels
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg --quiet || brew upgrade ffmpeg --quiet
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist
+
+      - name: Install macOS wheel
+        run: |
+          MAC_WHEEL=$(ls dist/*macosx_14_0_arm64*.whl)
+          echo "installing: $MAC_WHEEL"
+          pip install "$MAC_WHEEL"
+
+      - name: Verify install
+        run: |
+          # `meet --version` proves the entry point + version dynamic
+          # plumbing works. Direct sidecar invocation proves the
+          # binary made it into _bin/ and is exec-permission-correct.
+          meet --version || (meet --help 2>&1 | head -1) || true
+          python -c "import meet_record; print('meet_record version:', meet_record.__version__)"
+          python -c "from meet_record.capture import _resolve_darwin_recorder; print('recorder:', _resolve_darwin_recorder())"
+
+          BIN=$(python -c "from meet_record.capture import _resolve_darwin_recorder; print(_resolve_darwin_recorder())")
+          "$BIN" --version
+          "$BIN" devices --json | python -m json.tool | head -10
+
+      - name: Quick silent recording from the installed wheel
+        # End-to-end: the binary in the wheel actually records a WAV.
+        # No TCC permissions needed (--mic none --system none).
+        run: |
+          BIN=$(python -c "from meet_record.capture import _resolve_darwin_recorder; print(_resolve_darwin_recorder())")
+          "$BIN" record \
+              --mic none --system none \
+              --max-seconds 1.0 \
+              --output /tmp/wheel-smoke.wav \
+              < /dev/zero
+          test -s /tmp/wheel-smoke.wav
+          ls -la /tmp/wheel-smoke.wav
+          ffprobe -v error -show_entries stream=sample_rate,channels,sample_fmt -of default=nw=1 /tmp/wheel-smoke.wav

@@ -1,0 +1,11 @@
+# Ignore everything in this directory except this file.
+#
+# meet_record/_bin/ holds the macOS arm64 meet-record-mac binary in
+# the macOS wheel. The binary itself is built by mac.yml in CI and
+# copied here at wheel-build time by release.yml; it's never
+# committed. This .gitignore both keeps the directory present in the
+# tree (so setuptools.package-data can reference _bin/* during build)
+# and prevents accidental commits of a locally-built artefact.
+
+*
+!.gitignore
