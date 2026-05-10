@@ -50,4 +50,12 @@ where = ["."]
 include = ["meet_record*"]
 
 [project.optional-dependencies]
-dev = ["ruff", "pytest"]
+dev = ["ruff", "pytest", "pytest-timeout"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest-timeout: kills any test that runs longer than the given budget,
+# preventing CI hangs from a stuck mock recorder. Per-test overrides via
+# `@pytest.mark.timeout(N)` (seconds).
+timeout = 60
+addopts = "-ra --strict-markers"
