@@ -64,10 +64,19 @@ jobs:
           "$BIN" probe-permissions || echo "(exited non-zero — expected on CI runner)"
 
           echo "=== silent recording (--mic none --system none, 0.5s) ==="
+          # Redirect stdin from /dev/zero so the StopController's reader
+          # thread sees a never-closing stream of null bytes (which it
+          # silently ignores; only 0x71 'q' triggers .qByte). Without
+          # this, GitHub Actions' default shell stdin is closed at
+          # spawn, the reader hits EOF immediately, and stop fires
+          # before --max-seconds gets a chance — observed in M6b's
+          # first push. Production launches via Python use
+          # subprocess.PIPE which is a real open pipe; this mirrors that.
           "$BIN" record \
               --mic none --system none \
               --max-seconds 0.5 \
-              --output /tmp/silent.wav
+              --output /tmp/silent.wav \
+              < /dev/zero
 
           test -f /tmp/silent.wav
           SIZE=$(stat -f%z /tmp/silent.wav)
@@ -76,7 +85,7 @@ jobs:
           # Allow generous ±20% to account for SyntheticSilence's 20 ms drain
           # tick rounding and stop-flush boundary truncation.
           [ "$SIZE" -ge 25000 ] && [ "$SIZE" -le 38000 ] \
-              || (echo "size out of expected band" >&2; exit 1)
+              || (echo "size out of expected band ($SIZE bytes; expected 25000-38000)" >&2; exit 1)
 
           echo "=== ffprobe sanity ==="
           ffprobe -v error \
