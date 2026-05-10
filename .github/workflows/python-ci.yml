@@ -35,6 +35,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install ffmpeg
+        # ffmpeg is a runtime prereq of meetscribe-record on Linux
+        # (used by capture.py for chunk stitching at session stop and
+        # by audio.py for compression). The watchdog-restart e2e test
+        # exercises the multi-chunk concat path, so ffmpeg must be on
+        # PATH for the suite to run end-to-end.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
       - name: Install package + dev deps
         run: |
           python -m pip install --upgrade pip
