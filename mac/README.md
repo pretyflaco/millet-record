@@ -9,7 +9,7 @@ the repo root).
 
 ## Status
 
-**M4.2 prototype.** Captures 5 seconds of dual-channel audio:
+**M4.5b** (M4, M4.5b merged). Captures 5 seconds of dual-channel audio:
 
 - Microphone via `AVAudioEngine` input tap → **left** channel
 - System audio via Core Audio Process Tap → **right** channel
@@ -20,13 +20,21 @@ semantics so neither channel zero-pads mid-stream, soft-clipped via `tanh`
 (`SoftClip.swift`) to avoid full-scale saturation, and written as a stereo
 s16le 16 kHz WAV. On first mic delivery the mixer's `markMicReady()`
 discards any pre-mic system audio that accumulated during AVAudioEngine
-cold-start (~1–2 s on Apple Silicon), so paired emits begin from a
+cold-start (~0.2 s on Apple M1, measured), so paired emits begin from a
 common "now" instead of carrying a constant sys-leads-mic offset.
+
+The mic path applies a static **+12 dB** software gain (4.0×) by default
+(M4.5b) to compensate for the Apple Silicon level mismatch between
+AVAudioEngine input and Process Tap output. Without it, mic samples land
+~20 dB below system samples, which causes downstream channel-energy
+labelers (`meet/transcribe.py:_label_speakers_from_channels`) to
+mis-classify a Mac scribe as REMOTE. Override via
+`MEET_RECORD_MAC_MIC_GAIN=<float>` (see below).
 
 CLI parsing, signal handling, the q-byte stop protocol, and per-app
 capture selection all land in M5.
 
-Tracking issue: <https://github.com/pretyflaco/meetscribe-record/issues/1>
+Epic: <https://github.com/pretyflaco/meetscribe-record/issues/1>
 
 ## Requirements
 
@@ -104,9 +112,39 @@ ffmpeg -hide_banner -i /tmp/left.wav  -af volumedetect -f null - 2>&1 | grep vol
 ffmpeg -hide_banner -i /tmp/right.wav -af volumedetect -f null - 2>&1 | grep volume
 ```
 
-Expected M4 result: both channels have RMS ≥ −40 dBFS, neither saturates
-at −0.0 dBFS (tanh soft-clip leaves headroom — `tanh(1.0) ≈ 0.762` of full
-scale).
+Expected M4.5b result: both channels carry meaningful audio. Reference
+measurements from patternn's M1 with the production default (gain=4.0):
+left mean ≈ −24 dB, right mean ≈ −15 dB, gap ≈ 9 dB; left peak ≈ −9 dB
+leaves >8 dB of headroom and the tanh soft-clip stays inactive on
+normal speech. Concrete absolute levels depend on your hardware and
+input slider setting.
+
+## Environment variables
+
+- **`MEET_RECORD_MAC_DEBUG=1`** — emit per-callback frame counts to
+  stderr. Useful for tracing the mic and system push streams sample-
+  by-sample when investigating an issue. Off by default; the
+  unconditional `done:` summary at end of run is usually enough.
+
+- **`MEET_RECORD_MAC_MIC_GAIN=<float>`** — override the default mic
+  gain (`4.0`, baked into `MicCapture.defaultGain`). Multiplies each
+  mic sample before the tanh soft-clip stage. Examples:
+  - `=1` reproduces M4.2 behavior (no gain). Useful for debugging the
+    raw input level on hardware that may differ from M1.
+  - `=4` matches the production default (no-op vs unset).
+  - `=8` ≈ +18 dB. patternn's M4.5 testing showed this engages the
+    soft-clip on speech peaks and audibly amplifies the mic noise
+    floor in silences. Not recommended.
+
+  The default of 4.0× was picked from patternn's M4.5 matrix data on
+  M1; see `MicCapture.defaultGain` doc and pretyflaco/meetscribe-record#6
+  for the full audit. If you observe the default is wrong for your
+  hardware, file an issue with a `done:` summary at gain=1 plus L/R
+  mean RMS — we'll widen the data set before changing the default.
+
+The `done:` summary line at end of run reports `mic_input: rate=… Hz
+channels=… inputVolume=… gain=…` so the AVAudioEngine's native input
+format and `inputNode.volume` snapshot are always visible.
 
 ## Distribution status
 
