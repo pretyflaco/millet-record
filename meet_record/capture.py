@@ -1,14 +1,29 @@
 """Audio capture module for recording meeting audio.
 
 Captures dual-channel audio: microphone (your voice) on one channel,
-system audio (remote participants) on the other. Uses PipeWire/PulseAudio
-monitor sources via ffmpeg.
+system audio (remote participants) on the other.
 
-Reliability features:
-- ffmpeg stderr goes to a log file (prevents pipe buffer deadlock)
-- Watchdog thread monitors ffmpeg health and file growth
-- Auto-restart on ffmpeg failure with chunk-based recording
-- Chunk stitching on stop via ffmpeg concat
+Backends:
+- Linux: ffmpeg with PulseAudio/PipeWire monitor sources (default).
+- macOS 14.4+ Apple Silicon: meet-record-mac (Swift sidecar) using
+  Core Audio Process Tap + AVAudioEngine. Opt-in via MEET_RECORD_MAC=1
+  during the M6 transitional window; flips ON by default after the
+  M6c.ii integration round.
+
+Reliability features (apply to either backend):
+- subprocess stderr goes to a log file (prevents pipe buffer deadlock)
+- Watchdog thread monitors process health and file growth
+- Auto-restart on subprocess failure with chunk-based recording
+- Chunk stitching on stop via ffmpeg concat (post-process; ffmpeg
+  remains a runtime dep on macOS for stitching even when the recorder
+  is the Swift sidecar)
+
+Stop protocol (both backends):
+- Write `b"q"` to stdin → graceful flush + exit 0 within 5 s
+- Escalate via SIGINT (5 s) → SIGTERM (3 s) → SIGKILL
+- The Swift sidecar speaks this protocol natively (see
+  pretyflaco/meetscribe-record:mac/Sources/MeetRecordMac/StopController.swift),
+  so the ladder in `_stop_ffmpeg` is unchanged across backends.
 """
 
 from __future__ import annotations
@@ -37,12 +52,77 @@ _STALL_TIMEOUT = 15.0  # seconds of no file growth before declaring stall
 DRAIN_SECONDS = 10  # seconds to keep recording after user requests stop,
 # allowing ffmpeg's ~0.9x realtime pipeline to flush
 
-# WAV format constants (must match ffmpeg output settings)
+# WAV format constants (must match recorder output settings)
 _WAV_HEADER_BYTES = 44  # standard WAV header size
 _SAMPLE_RATE = 16000  # Hz
 _CHANNELS = 2  # stereo (left=mic, right=system)
 _BYTES_PER_SAMPLE = 2  # pcm_s16le = 16-bit = 2 bytes
 _BYTES_PER_SECOND = _SAMPLE_RATE * _CHANNELS * _BYTES_PER_SAMPLE  # 64000
+
+# ─── macOS sidecar (M6a) ─────────────────────────────────────────────────────
+
+# Env var that opts the darwin branch IN during the M6 transitional window.
+# After M6c.ii integration round signs off, a follow-up PR will flip the
+# default ON for darwin and demote this var to an opt-OUT (set to "0").
+_DARWIN_OPT_IN_ENV = "MEET_RECORD_MAC"
+
+# Env var that overrides the path to the Swift sidecar binary. Primarily
+# used by the test suite to point at a mock recorder; can also be used in
+# manual smoke testing to validate a locally-built binary against a
+# pip-installed package.
+_DARWIN_RECORDER_PATH_ENV = "MEET_RECORD_MAC_PATH"
+
+
+def _resolve_darwin_recorder() -> Path:
+    """Locate the meet-record-mac binary.
+
+    Resolution order:
+      1. ``MEET_RECORD_MAC_PATH`` env var (test/manual override).
+      2. ``meet_record/_bin/meet-record-mac`` next to this module
+         (the path the macOS arm64 wheel installs to).
+      3. ``meet-record-mac`` on ``PATH`` (development convenience for
+         running against a `swift build` artefact in a checkout).
+
+    Raises FileNotFoundError if none of the above resolve.
+    """
+    override = os.environ.get(_DARWIN_RECORDER_PATH_ENV)
+    if override:
+        candidate = Path(override).expanduser()
+        if not candidate.is_file():
+            raise FileNotFoundError(
+                f"{_DARWIN_RECORDER_PATH_ENV}={override} does not point to a file"
+            )
+        return candidate
+
+    bundled = Path(__file__).parent / "_bin" / "meet-record-mac"
+    if bundled.is_file():
+        return bundled
+
+    # Fallback to PATH for development.
+    import shutil
+
+    on_path = shutil.which("meet-record-mac")
+    if on_path:
+        return Path(on_path)
+
+    raise FileNotFoundError(
+        "meet-record-mac not found. Install the macOS arm64 wheel of "
+        "meetscribe-record (which bundles it at meet_record/_bin/), set "
+        f"{_DARWIN_RECORDER_PATH_ENV} to a built binary, or add it to PATH."
+    )
+
+
+def _darwin_backend_enabled() -> bool:
+    """True iff the macOS sidecar backend should be used.
+
+    Gated by ``MEET_RECORD_MAC=1`` during the M6 transitional window.
+    Any other value (unset, "0", "no", empty) keeps the legacy ffmpeg+
+    PulseAudio path so a Mac user with a default install sees no
+    behavior change until they explicitly opt in.
+    """
+    if sys.platform != "darwin":
+        return False
+    return os.environ.get(_DARWIN_OPT_IN_ENV, "").strip() == "1"
 
 
 # ─── Data classes ────────────────────────────────────────────────────────────
@@ -121,6 +201,16 @@ class RecordingSession:
         self._actual_monitor = self.monitor_source
 
         if self.use_virtual_sink:
+            if _darwin_backend_enabled():
+                # Virtual sinks are a PulseAudio (`pactl module-null-sink`)
+                # construct; the macOS sidecar uses Process Tap which has
+                # no equivalent. Refuse early rather than fail mid-start.
+                raise RuntimeError(
+                    "use_virtual_sink=True is not supported on the macOS "
+                    "sidecar backend. Per-app capture on darwin is achieved "
+                    "via `--system app:<bundle-id>` (passed as the "
+                    "`monitor=` arg to create_session)."
+                )
             self._actual_monitor = self._setup_virtual_sink()
 
         self._metadata = {
@@ -349,8 +439,54 @@ class RecordingSession:
             str(output_path),
         ]
 
+    def _build_recorder_cmd_darwin(self, output_path: Path) -> list[str]:
+        """Build the meet-record-mac command for the macOS sidecar (M6a).
+
+        Drop-in for ``_build_ffmpeg_cmd`` from ``_start_ffmpeg_chunk``'s
+        perspective: produces a Popen-ready argv that writes a stereo
+        s16le 16 kHz WAV to ``output_path`` with L=mic, R=system, and
+        accepts the same ``b"q"``-on-stdin / SIGINT / SIGTERM stop ladder
+        ``_stop_ffmpeg`` already drives.
+
+        On darwin, ``self.mic_source`` and ``self._actual_monitor`` carry
+        sidecar selectors instead of PulseAudio source names:
+
+        * mic_source: "default" | "none" | <kAudioDevicePropertyDeviceUID>
+        * monitor:    "system"  | "none" | "app:<bundle-id>"
+
+        ``create_session`` injects the right defaults via
+        ``_default_darwin_mic`` / ``_default_darwin_monitor`` when the
+        caller doesn't pass explicit overrides.
+
+        ``--max-seconds 0`` keeps the recorder running until Python sends
+        the stop signal; matches the Linux/ffmpeg semantics where the
+        parent owns chunk boundary timing.
+        """
+        recorder = _resolve_darwin_recorder()
+        return [
+            str(recorder),
+            "record",
+            "--output",
+            str(output_path),
+            "--mic",
+            self.mic_source,
+            "--system",
+            self._actual_monitor,
+            "--sample-rate",
+            str(_SAMPLE_RATE),
+            "--max-seconds",
+            "0",
+        ]
+
     def _start_ffmpeg_chunk(self) -> None:
-        """Start ffmpeg writing to a new chunk file."""
+        """Start the recorder writing to a new chunk file.
+
+        Despite the legacy name, this dispatches between the Linux ffmpeg
+        path and the macOS sidecar path based on
+        ``_darwin_backend_enabled()``. The ``Popen`` setup, startup poll,
+        log-file handling, and downstream watchdog are identical across
+        backends because the sidecar speaks ffmpeg's stop protocol.
+        """
         chunk_idx = len(self._chunks)
         stem = self.output_file.stem
         if chunk_idx == 0:
@@ -362,7 +498,10 @@ class RecordingSession:
         self._current_chunk = chunk_path
         self._chunks.append(chunk_path)
 
-        # Open log file for ffmpeg stderr (append mode — shared across restarts)
+        # Open log file for recorder stderr (append mode — shared across
+        # restarts). Filename retains `.ffmpeg.log` for backward-compat
+        # with anyone scripting log triage; the file's contents are
+        # sidecar stderr on darwin.
         log_path = self.output_file.with_suffix(".ffmpeg.log")
         if self._ffmpeg_log is None or self._ffmpeg_log.closed:
             self._ffmpeg_log = open(log_path, "a")
@@ -372,7 +511,10 @@ class RecordingSession:
         )
         self._ffmpeg_log.flush()
 
-        cmd = self._build_ffmpeg_cmd(chunk_path)
+        if _darwin_backend_enabled():
+            cmd = self._build_recorder_cmd_darwin(chunk_path)
+        else:
+            cmd = self._build_ffmpeg_cmd(chunk_path)
 
         self._ffmpeg_proc = subprocess.Popen(
             cmd,
@@ -733,8 +875,17 @@ def create_session(
         output_dir = session_dir
     # When filename is explicitly provided via -f, keep flat layout.
 
-    mic_source = mic or get_default_source()
-    monitor_source = monitor or get_monitor_source()
+    if _darwin_backend_enabled():
+        # macOS sidecar selector defaults. "default" tells the Swift
+        # binary to use AVAudioEngine's default input; "system" tells it
+        # to use a system-wide Process Tap (every output process). The
+        # caller can still override either via explicit `mic=` /
+        # `monitor=` (e.g. mic="<device-uid>", monitor="app:us.zoom.xos").
+        mic_source = mic or "default"
+        monitor_source = monitor or "system"
+    else:
+        mic_source = mic or get_default_source()
+        monitor_source = monitor or get_monitor_source()
 
     return RecordingSession(
         output_dir=output_dir,
@@ -746,13 +897,63 @@ def create_session(
 
 
 def check_prerequisites() -> list[str]:
-    """Check that required system tools are available. Returns list of issues."""
+    """Check that required system tools are available. Returns list of issues.
+
+    On darwin with the sidecar backend opted in, the checks shift from
+    pactl/PulseAudio to (a) the meet-record-mac binary being resolvable,
+    and (b) ``meet-record-mac probe-permissions`` reporting both mic and
+    system-audio TCC granted. ffmpeg is still required for chunk
+    stitching at session stop.
+    """
     issues = []
 
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
-        issues.append("ffmpeg is not installed. Install with: sudo apt install ffmpeg")
+        if sys.platform == "darwin":
+            issues.append(
+                "ffmpeg is not installed. Install with: brew install ffmpeg"
+            )
+        else:
+            issues.append(
+                "ffmpeg is not installed. Install with: sudo apt install ffmpeg"
+            )
+
+    if _darwin_backend_enabled():
+        # Sidecar resolution
+        try:
+            recorder = _resolve_darwin_recorder()
+        except FileNotFoundError as e:
+            issues.append(str(e))
+            return issues
+
+        # Permission probe — sidecar exit 0 means both mic + system-audio
+        # are granted. Non-zero exit yields the human-readable status
+        # lines verbatim, which are useful for diagnosing which bucket
+        # is blocked.
+        try:
+            result = subprocess.run(
+                [str(recorder), "probe-permissions"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                issues.append(
+                    "macOS audio permissions not granted:\n"
+                    + result.stdout.strip()
+                    + "\n  Grant via System Settings → Privacy & Security → "
+                    "Microphone, and → System Audio Recording."
+                )
+        except subprocess.TimeoutExpired:
+            issues.append(
+                f"meet-record-mac probe-permissions timed out (>10 s); "
+                f"binary at {recorder} may be hung."
+            )
+        except OSError as e:
+            issues.append(f"Cannot run meet-record-mac: {e}")
+
+        return issues
 
     try:
         subprocess.run(["pactl", "--version"], capture_output=True, check=True)

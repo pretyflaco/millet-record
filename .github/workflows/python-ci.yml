@@ -1,0 +1,55 @@
+name: python-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "meet_record/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/python-ci.yml"
+  pull_request:
+    paths:
+      - "meet_record/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/python-ci.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tier-1 supported Python versions per pyproject.toml's
+        # requires-python = ">=3.10". 3.13 added once we explicitly
+        # support it via a classifier.
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ffmpeg
+        # ffmpeg is a runtime prereq of meetscribe-record on Linux
+        # (used by capture.py for chunk stitching at session stop and
+        # by audio.py for compression). The watchdog-restart e2e test
+        # exercises the multi-chunk concat path, so ffmpeg must be on
+        # PATH for the suite to run end-to-end.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest -v
