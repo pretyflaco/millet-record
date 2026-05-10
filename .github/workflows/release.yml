@@ -100,27 +100,33 @@ jobs:
 
       - name: Retag for macOS arm64
         # `wheel tags --platform-tag` rewrites the wheel filename and
-        # the WHEEL metadata's Tag: line. The retagged wheel still
-        # contains exactly the same files (including
-        # meet_record/_bin/meet-record-mac); the tag is platform-
-        # tagging metadata only. macosx_14_0_arm64 is the lowest tag
-        # that pip will offer to a macOS-14.x arm64 host;
-        # Package.swift enforces 14.4 at runtime.
+        # the WHEEL metadata's Tag: line in place (no --output-dir
+        # flag in wheel<=0.46; the retagged wheel is written next to
+        # the input). We make two copies of the base wheel in dist/:
+        # one stays as py3-none-any (Linux/universal), the other gets
+        # retagged via --remove so only the macosx-tagged variant
+        # survives in dist/.
+        #
+        # macosx_14_0_arm64 is the lowest tag pip will match on a 14.x
+        # arm64 host; Package.swift enforces 14.4 at runtime.
         run: |
-          mkdir -p dist
+          mkdir -p dist retag-tmp
           BASE_WHEEL=$(ls dist-base/*.whl)
           echo "base wheel: $BASE_WHEEL"
 
-          # Linux/universal wheel: copy as-is (binary inside is harmless
-          # noise on Linux; capture.py never resolves it on non-darwin).
+          # Linux/universal wheel: copy as-is.
           cp "$BASE_WHEEL" dist/
 
-          # macOS arm64 wheel: retag.
+          # macOS arm64 wheel: copy to a working dir, retag in place
+          # with --remove (drops the py3-none-any variant from
+          # retag-tmp), then move the resulting macosx wheel into dist/.
+          cp "$BASE_WHEEL" retag-tmp/
           python -m wheel tags \
               --platform-tag macosx_14_0_arm64 \
               --remove \
-              --output-dir dist \
-              "$BASE_WHEEL"
+              retag-tmp/*.whl
+          mv retag-tmp/*.whl dist/
+          rmdir retag-tmp
 
           ls -la dist/
 
