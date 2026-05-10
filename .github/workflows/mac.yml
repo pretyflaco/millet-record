@@ -43,6 +43,48 @@ jobs:
           file "$BIN"
           echo "bin=$BIN" >> "$GITHUB_OUTPUT"
 
+      - name: Smoke test (CLI surface + silent recording)
+        # Catches runtime regressions that unit tests can't: WAV header
+        # bytes, stop-controller wiring, arg parsing post-build, JSON
+        # output validity. Uses --mic none --system none so it doesn't
+        # need TCC-granted mic / system-audio permissions (the runner
+        # has neither).
+        run: |
+          BIN="${{ steps.locate.outputs.bin }}"
+
+          echo "=== --version + --help ==="
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+          echo "=== devices --json ==="
+          "$BIN" devices --json | tee /tmp/devices.json
+          python3 -c "import json,sys; json.load(open('/tmp/devices.json'))"
+          echo "=== probe-permissions ==="
+          # Exit code likely 1 on a fresh CI runner with no TCC grants;
+          # we just confirm it runs without crashing.
+          "$BIN" probe-permissions || echo "(exited non-zero — expected on CI runner)"
+
+          echo "=== silent recording (--mic none --system none, 0.5s) ==="
+          "$BIN" record \
+              --mic none --system none \
+              --max-seconds 0.5 \
+              --output /tmp/silent.wav
+
+          test -f /tmp/silent.wav
+          SIZE=$(stat -f%z /tmp/silent.wav)
+          echo "silent.wav size = $SIZE bytes"
+          # 0.5 s × 16000 Hz × 2 ch × 2 B/sample + 44 B header = 32044 expected.
+          # Allow generous ±20% to account for SyntheticSilence's 20 ms drain
+          # tick rounding and stop-flush boundary truncation.
+          [ "$SIZE" -ge 25000 ] && [ "$SIZE" -le 38000 ] \
+              || (echo "size out of expected band" >&2; exit 1)
+
+          echo "=== ffprobe sanity ==="
+          ffprobe -v error \
+              -show_entries stream=sample_rate,channels,sample_fmt \
+              -show_entries format=duration \
+              -of default=nw=1 \
+              /tmp/silent.wav
+
       - name: Upload unsigned binary artifact
         uses: actions/upload-artifact@v4
         with:
