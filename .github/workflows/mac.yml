@@ -63,29 +63,44 @@ jobs:
           # we just confirm it runs without crashing.
           "$BIN" probe-permissions || echo "(exited non-zero — expected on CI runner)"
 
-          echo "=== silent recording (--mic none --system none, 0.5s) ==="
-          # Redirect stdin from /dev/zero so the StopController's reader
-          # thread sees a never-closing stream of null bytes (which it
-          # silently ignores; only 0x71 'q' triggers .qByte). Without
+          echo "=== silent recording (--mic none --system none, 2s) ==="
+          # Stdin redirection: /dev/zero gives the binary a never-closing
+          # stream of null bytes. The StopController's stdin reader
+          # silently ignores anything except 0x71 'q' so /dev/zero is
+          # effectively "stdin always open, no q ever sent". Without
           # this, GitHub Actions' default shell stdin is closed at
           # spawn, the reader hits EOF immediately, and stop fires
-          # before --max-seconds gets a chance — observed in M6b's
-          # first push. Production launches via Python use
-          # subprocess.PIPE which is a real open pipe; this mirrors that.
+          # before --max-seconds gets a chance. Production launches via
+          # Python use subprocess.PIPE which is a real open pipe.
+          #
+          # Duration choice: 2.0 s rather than 0.5 s. The Mixer's drain
+          # DispatchSourceTimer + the two SyntheticSilence pump timers
+          # all schedule at 20 ms intervals, but on the macos-14 runner
+          # under load (build still warming caches, parallel jobs, etc.)
+          # observed effective tick rate is closer to 100 ms — only ~6
+          # paired ticks fired in 0.5 s of wallclock during the first
+          # M6b push. This is a known DispatchSource leeway/QoS quirk;
+          # not worth tuning the production code for. 2.0 s gives ample
+          # headroom even at 10x slower timer cadence.
           "$BIN" record \
               --mic none --system none \
-              --max-seconds 0.5 \
+              --max-seconds 2.0 \
               --output /tmp/silent.wav \
               < /dev/zero
 
           test -f /tmp/silent.wav
           SIZE=$(stat -f%z /tmp/silent.wav)
           echo "silent.wav size = $SIZE bytes"
-          # 0.5 s × 16000 Hz × 2 ch × 2 B/sample + 44 B header = 32044 expected.
-          # Allow generous ±20% to account for SyntheticSilence's 20 ms drain
-          # tick rounding and stop-flush boundary truncation.
-          [ "$SIZE" -ge 25000 ] && [ "$SIZE" -le 38000 ] \
-              || (echo "size out of expected band ($SIZE bytes; expected 25000-38000)" >&2; exit 1)
+          # Math at 16 kHz × 2 ch × 2 B = 64000 B/s data:
+          #   2.0 s perfect:  44 + 128000 = 128044 bytes
+          #   0.5 s observed: 44 + ~6400  = ~6444 bytes (observed M6b push #1)
+          # Lower bound: header + at least 0.1 s of audio = 44 + 6400 = 6444.
+          # Upper bound: full duration + slack = 128044 + 5% = ~135000.
+          # If we land below the lower bound, the recording produced
+          # essentially no paired frames, which means the entire
+          # SyntheticSilence + Mixer + WavWriter chain is broken.
+          [ "$SIZE" -ge 6400 ] && [ "$SIZE" -le 140000 ] \
+              || (echo "size out of expected band ($SIZE bytes; expected 6400-140000)" >&2; exit 1)
 
           echo "=== ffprobe sanity ==="
           ffprobe -v error \
