@@ -29,6 +29,15 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Install ffmpeg
+        # ffmpeg/ffprobe used by the smoke step's WAV format validation
+        # and is also a runtime prereq of meetscribe-record on darwin
+        # (chunk stitching at session stop, post-processing in audio.py).
+        run: |
+          brew install ffmpeg --quiet || brew upgrade ffmpeg --quiet
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
       - name: Build (release)
         run: swift build -c release
 
