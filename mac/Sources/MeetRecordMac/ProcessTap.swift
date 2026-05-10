@@ -6,7 +6,10 @@
 //   https://github.com/RecapAI/Recap/blob/main/Recap/Audio/Capture/Tap/ProcessTap.swift
 // Original copyright (c) 2025 Rawand Ahmed Shaswar. See NOTICE in repo root.
 //
-// M3 scope: system-wide tap (all output processes), no per-app selection.
+// Scope:
+//   * M3:    system-wide tap (default, all output processes).
+//   * M5:    per-app tap via bundle ID (`--system app:<bundle-id>`).
+//
 // The IO block hands buffers to a caller-supplied closure; this file does
 // not concern itself with file output, mixing, or resampling.
 //
@@ -17,6 +20,15 @@ import Foundation
 import AudioToolbox
 import CoreAudio
 import OSLog
+
+/// What sources to tap.
+enum TapTarget: Equatable {
+    /// All output processes ("system-wide"). Default.
+    case systemWide
+    /// Only the process whose `kAudioProcessPropertyBundleID` matches.
+    /// Lookup is case-sensitive (matches macOS bundle-ID semantics).
+    case bundleID(String)
+}
 
 @available(macOS 14.4, *)
 final class ProcessTap {
@@ -32,14 +44,23 @@ final class ProcessTap {
     private var deviceProcID: AudioDeviceIOProcID?
     private var ioHandler: IOBlockHandler?
 
-    /// Activate a system-wide process tap and start delivering audio to `handler`.
-    /// `handler` is called on a background queue; it must not block.
-    func start(handler: @escaping IOBlockHandler) throws {
+    /// Activate a process tap (system-wide or per-app) and start delivering
+    /// audio to `handler`. `handler` is called on a background queue; it
+    /// must not block.
+    func start(target: TapTarget = .systemWide, handler: @escaping IOBlockHandler) throws {
         self.ioHandler = handler
 
-        // 1. Create a system-wide Process Tap. Empty process list + .global
-        //    means "tap every output process".
-        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        // 1. Build the tap description. System-wide is "global tap with
+        //    no exclusions"; per-app uses `stereoMixdownOfProcesses` with
+        //    a single AudioObjectID resolved from the requested bundle ID.
+        let tapDesc: CATapDescription
+        switch target {
+        case .systemWide:
+            tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        case .bundleID(let bid):
+            let pid = try Self.processObjectID(forBundleID: bid)
+            tapDesc = CATapDescription(stereoMixdownOfProcesses: [pid])
+        }
         tapDesc.uuid = UUID()
         tapDesc.muteBehavior = .unmuted
 
@@ -62,8 +83,13 @@ final class ProcessTap {
         let outputUID = try Self.deviceUID(systemOutputID)
         let aggregateUID = UUID().uuidString
 
+        let aggName: String
+        switch target {
+        case .systemWide: aggName = "MeetRecordMac-SystemTap"
+        case .bundleID(let b): aggName = "MeetRecordMac-Tap-\(b)"
+        }
         let description: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "MeetRecordMac-Tap",
+            kAudioAggregateDeviceNameKey: aggName,
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
@@ -178,14 +204,83 @@ final class ProcessTap {
         }
         return uid as String
     }
+
+    // MARK: - Per-app lookup (M5)
+
+    /// Walk `kAudioHardwarePropertyProcessObjectList` and return the
+    /// AudioObjectID of the first process whose bundle ID matches
+    /// `bundleID`. Throws `ProcessTapError.processNotFound` if no
+    /// matching process is currently running with audio activity
+    /// (Process Tap only knows about processes that have actually
+    /// touched the audio HAL since boot — newly-launched apps that
+    /// haven't played any audio yet may not appear here).
+    static func processObjectID(forBundleID bundleID: String) throws -> AudioObjectID {
+        let processes = try readProcessObjectList()
+        for pid in processes {
+            if let bid = try? readProcessBundleID(pid), bid == bundleID {
+                return pid
+            }
+        }
+        throw ProcessTapError.processNotFound(bundleID: bundleID)
+    }
+
+    private static func readProcessObjectList() throws -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        var err = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil, &dataSize
+        )
+        guard err == noErr else {
+            throw ProcessTapError.coreAudio("process object list size query failed: \(err)")
+        }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var ids = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        err = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil, &dataSize, &ids
+        )
+        guard err == noErr else {
+            throw ProcessTapError.coreAudio("process object list query failed: \(err)")
+        }
+        return ids
+    }
+
+    private static func readProcessBundleID(_ id: AudioObjectID) throws -> String {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyBundleID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var cfStr: CFString?
+        let err = withUnsafeMutablePointer(to: &cfStr) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(id, &address, 0, nil, &size, ptr)
+        }
+        guard err == noErr, let s = cfStr else {
+            // Some process objects (e.g. coreaudiod itself, system
+            // services) don't expose a bundle ID. Treat as no-match.
+            throw ProcessTapError.coreAudio("process bundle ID read failed: \(err)")
+        }
+        return s as String
+    }
 }
 
 enum ProcessTapError: Error, CustomStringConvertible {
     case coreAudio(String)
+    case processNotFound(bundleID: String)
 
     var description: String {
         switch self {
         case .coreAudio(let s): return "CoreAudio error: \(s)"
+        case .processNotFound(let bid):
+            return "ProcessTap: no audio-active process found with bundle ID \(bid.debugDescription). " +
+                   "Process Tap can only target processes that have already touched the audio HAL — " +
+                   "make sure the app is running and has played at least one audio frame."
         }
     }
 }
