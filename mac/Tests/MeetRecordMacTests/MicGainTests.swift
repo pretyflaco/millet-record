@@ -81,24 +81,66 @@ final class MicGainTests: XCTestCase {
 
     // MARK: - Env-var parsing
 
-    func testEnvDefaultsToUnityWhenMissing() {
-        XCTAssertEqual(MicGain.gainFromEnvironment([:]), 1.0)
+    func testEnvFallsBackToProvidedDefaultWhenMissing() {
+        // Missing var → caller-supplied default flows through.
+        XCTAssertEqual(MicGain.gainFromEnvironment([:], defaultGain: 1.0), 1.0)
+        XCTAssertEqual(MicGain.gainFromEnvironment([:], defaultGain: 4.0), 4.0)
+        XCTAssertEqual(
+            MicGain.gainFromEnvironment([:], defaultGain: MicCapture.defaultGain),
+            MicCapture.defaultGain
+        )
     }
 
     func testEnvParsesValidFloat() {
-        XCTAssertEqual(MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "4.0"]), 4.0)
-        XCTAssertEqual(MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "8"]), 8.0)
-        XCTAssertEqual(MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "0.5"]), 0.5)
+        // Env var present + parseable → its value wins over default.
+        XCTAssertEqual(
+            MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "4.0"], defaultGain: 1.0),
+            4.0
+        )
+        XCTAssertEqual(
+            MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "8"], defaultGain: 4.0),
+            8.0
+        )
+        XCTAssertEqual(
+            MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "0.5"], defaultGain: 4.0),
+            0.5
+        )
+        // Crucially: setting the env var to "1" reproduces M4.2 unity-gain
+        // behavior even when the production default is 4.0. This is the
+        // documented escape hatch.
+        XCTAssertEqual(
+            MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": "1"], defaultGain: 4.0),
+            1.0
+        )
     }
 
-    func testEnvFallsBackToUnityOnInvalidInput() {
+    func testEnvFallsBackToDefaultOnInvalidInput() {
         let invalids: [String] = ["", "abc", "nan", "-1", "0", "inf"]
         for s in invalids {
             XCTAssertEqual(
-                MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": s]),
-                1.0,
-                "Invalid env value \(s.debugDescription) should fall back to gain=1.0"
+                MicGain.gainFromEnvironment(["MEET_RECORD_MAC_MIC_GAIN": s], defaultGain: 4.0),
+                4.0,
+                "Invalid env value \(s.debugDescription) should fall back to provided default"
             )
         }
+    }
+
+    // MARK: - Production default (M4.5b)
+
+    /// Locks the M4.5b decision: production default mic gain is 4.0×.
+    /// If anyone changes this without an issue + data justifying the
+    /// change, the failure message points them at the audit trail.
+    ///
+    /// Decision data in pretyflaco/meetscribe-record#6:
+    ///   - patternn's M4.5 matrix on Apple M1: speech-active L mean
+    ///     -35.0/-24.3/-18.5 dB at gain 1/4/8, R stable at -15.x dB
+    ///   - gain=4 → labeler you_ratio 0.27 (1.79× past 0.15 floor),
+    ///             8.7 dB peak headroom, soft-clip not engaging
+    ///   - gain=8 → audibly amplified noise floor in silences
+    func testDefaultGainMatchesProductionDefault() {
+        XCTAssertEqual(
+            MicCapture.defaultGain, 4.0, accuracy: 0.0001,
+            "M4.5b ships gain=4.0× to close the +20 dB Apple Silicon mic-vs-tap gap. See pretyflaco/meetscribe-record#6 before changing this."
+        )
     }
 }

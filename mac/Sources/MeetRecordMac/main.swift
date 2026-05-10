@@ -50,13 +50,16 @@ func debugLog(_ msg: @autoclosure () -> String) {
     }
 }
 
-// MEET_RECORD_MAC_MIC_GAIN=<float> applies a fixed software gain on the
-// mic path before tanh soft-clip. Default 1.0 (no-op; preserves M4.2
-// behavior). DIAGNOSTIC ONLY — used to localize the M4.5 mic-vs-system
-// level gap @patternn observed (~22 dB on Apple M1 internal mic). The
-// eventual M4.5 fix may or may not bake a non-unity default into
-// MicCapture; that decision is on data, not preempted here.
-let micGain = MicGain.gainFromEnvironment(ProcessInfo.processInfo.environment)
+// MEET_RECORD_MAC_MIC_GAIN=<float> overrides the default mic gain.
+// Default is `MicCapture.defaultGain` (= 4.0× as of M4.5b; closes the
+// Apple Silicon mic-vs-tap level gap that was blocking the downstream
+// channel-energy labeler). Set to 1.0 to reproduce M4.2 behavior (no
+// gain). See MicCapture.defaultGain doc for the full decision audit
+// and pretyflaco/meetscribe-record#6.
+let micGain = MicGain.gainFromEnvironment(
+    ProcessInfo.processInfo.environment,
+    defaultGain: MicCapture.defaultGain
+)
 
 // MARK: - WAV writer + Mixer
 
@@ -218,7 +221,7 @@ do {
 
 let captureSeconds: TimeInterval = 5.0
 FileHandle.standardError.write(Data(
-    "meet-record-mac M4.5: capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
+    "meet-record-mac M4.5b (mic gain default \(MicCapture.defaultGain)x): capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
 ))
 
 Thread.sleep(forTimeInterval: captureSeconds)

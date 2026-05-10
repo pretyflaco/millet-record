@@ -23,17 +23,39 @@ final class MicCapture {
     /// background thread; do not block.
     typealias FrameHandler = (UnsafePointer<Float>, Int) -> Void
 
+    /// Default mic gain multiplier (M4.5b).
+    ///
+    /// **Why 4.0**: On Apple Silicon, AVAudioEngine input levels run ~20 dB
+    /// below Process Tap output for the same source material. Without
+    /// compensation, downstream channel-energy-based labelers
+    /// (`meet/transcribe.py:_label_speakers_from_channels`) fail to
+    /// recognize the local scribe (you_ratio ~0.09 < 0.15 threshold).
+    ///
+    /// 4.0× (≈ +12 dB) was chosen over 8.0× (≈ +18 dB) on patternn's M4.5
+    /// matrix data:
+    ///   - 4.0× yields you_ratio ≈ 0.27, comfortably past the 0.15 floor
+    ///   - 4.0× preserves 8.7 dB of peak headroom (vs 2.6 dB at 8.0×)
+    ///   - 4.0× does not engage the tanh soft-clip on normal speech (8.0×
+    ///     was observed engaging, costing ~1.5 dB on peaks)
+    ///   - 4.0× amplifies the mic's noise floor by 12 dB rather than 18 dB,
+    ///     reducing the chance of triggering Whisper's quiet-noise
+    ///     hallucinations during silences.
+    ///
+    /// See pretyflaco/meetscribe-record#6 for the full decision audit.
+    /// Override via `MEET_RECORD_MAC_MIC_GAIN=<float>` env var; set to 1.0
+    /// to reproduce M4.2 behavior (no gain).
+    static let defaultGain: Float = 4.0
+
     private let logger = Logger(subsystem: "tools.pretyflaco.meetrecordmac", category: "MicCapture")
 
     private let engine = AVAudioEngine()
     private let targetSampleRate: Double
 
-    /// Diagnostic gain multiplier applied to each Float sample before the
-    /// caller's frame handler sees them. Default 1.0 (no-op). Set via
-    /// `MEET_RECORD_MAC_MIC_GAIN` env var in main.swift. Tracked under
-    /// M4.5: the input level gap @patternn observed (mic ~22 dB below sys)
-    /// is being investigated; this is the knob the investigation uses to
-    /// localize the gap, not a baked-in fix.
+    /// Static gain multiplier applied to each Float sample before the
+    /// caller's frame handler sees them. Default `defaultGain` (= 4.0,
+    /// see static doc). Override via `MEET_RECORD_MAC_MIC_GAIN` env var
+    /// in main.swift. Set to 1.0 to disable; values > 8.0 will engage
+    /// the Mixer's tanh soft-limiter on normal speech peaks.
     let gain: Float
 
     private var converter: AVAudioConverter?
@@ -51,7 +73,7 @@ final class MicCapture {
     /// low at unity volume."
     private(set) var inputNodeVolume: Float = 0
 
-    init(targetSampleRate: Double = 16_000, gain: Float = 1.0) {
+    init(targetSampleRate: Double = 16_000, gain: Float = MicCapture.defaultGain) {
         self.targetSampleRate = targetSampleRate
         self.gain = gain
     }
