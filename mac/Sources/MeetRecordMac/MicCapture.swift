@@ -13,6 +13,8 @@
 
 import Foundation
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import OSLog
 
 @available(macOS 14.4, *)
@@ -51,6 +53,12 @@ final class MicCapture {
     private let engine = AVAudioEngine()
     private let targetSampleRate: Double
 
+    /// Optional explicit input device UID. When non-nil, `start(...)`
+    /// resolves the UID via Core Audio and binds the AVAudioEngine
+    /// input node's underlying AUHAL to that device before installing
+    /// the tap. When nil, AVAudioEngine uses the system default input.
+    private let inputDeviceUID: String?
+
     /// Static gain multiplier applied to each Float sample before the
     /// caller's frame handler sees them. Default `defaultGain` (= 4.0,
     /// see static doc). Override via `MEET_RECORD_MAC_MIC_GAIN` env var
@@ -73,9 +81,14 @@ final class MicCapture {
     /// low at unity volume."
     private(set) var inputNodeVolume: Float = 0
 
-    init(targetSampleRate: Double = 16_000, gain: Float = MicCapture.defaultGain) {
+    init(
+        targetSampleRate: Double = 16_000,
+        gain: Float = MicCapture.defaultGain,
+        inputDeviceUID: String? = nil
+    ) {
         self.targetSampleRate = targetSampleRate
         self.gain = gain
+        self.inputDeviceUID = inputDeviceUID
     }
 
     /// Start capture. Must be called on the main thread (AVAudioEngine
@@ -85,6 +98,19 @@ final class MicCapture {
         self.handler = handler
 
         let input = engine.inputNode
+
+        // M5: optional pinning of the input node to a specific HAL
+        // device. AVAudioEngine on macOS exposes the input AUHAL as
+        // `inputNode.audioUnit`; the canonical way to switch input
+        // devices is to set kAudioOutputUnitProperty_CurrentDevice on
+        // it before any tap is installed. After this property is set,
+        // `inputNode.outputFormat(forBus: 0)` reports the chosen
+        // device's native format.
+        if let uid = inputDeviceUID {
+            let deviceID = try Self.deviceID(forUID: uid)
+            try Self.setInputDevice(on: input, to: deviceID)
+        }
+
         let nativeFormat = input.outputFormat(forBus: 0)
         guard nativeFormat.sampleRate > 0, nativeFormat.channelCount > 0 else {
             throw MicCaptureError.engine("Input node returned invalid format: \(nativeFormat)")
@@ -174,9 +200,87 @@ final class MicCapture {
 
 enum MicCaptureError: Error, CustomStringConvertible {
     case engine(String)
+    case deviceNotFound(uid: String)
     var description: String {
         switch self {
         case .engine(let s): return "MicCapture engine error: \(s)"
+        case .deviceNotFound(let uid):
+            return "MicCapture: no input device with UID \(uid.debugDescription) " +
+                   "(use `meet-record-mac devices` to list available UIDs)."
+        }
+    }
+}
+
+@available(macOS 14.4, *)
+extension MicCapture {
+    /// Look up an input-capable device whose `kAudioDevicePropertyDeviceUID`
+    /// matches `uid`. Throws `.deviceNotFound` if none matches.
+    fileprivate static func deviceID(forUID uid: String) throws -> AudioObjectID {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        var err = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil, &dataSize
+        )
+        guard err == noErr else {
+            throw MicCaptureError.engine("device list size query failed: \(err)")
+        }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var ids = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        err = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil, &dataSize, &ids
+        )
+        guard err == noErr else {
+            throw MicCaptureError.engine("device list query failed: \(err)")
+        }
+        for id in ids {
+            if let s = readDeviceUID(id), s == uid {
+                return id
+            }
+        }
+        throw MicCaptureError.deviceNotFound(uid: uid)
+    }
+
+    fileprivate static func readDeviceUID(_ id: AudioObjectID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var cfStr: CFString?
+        let err = withUnsafeMutablePointer(to: &cfStr) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(id, &address, 0, nil, &size, ptr)
+        }
+        guard err == noErr, let s = cfStr else { return nil }
+        return s as String
+    }
+
+    /// Bind the AVAudioEngine input node's underlying AUHAL to the
+    /// requested device. Must be called BEFORE `installTap`/`prepare`/
+    /// `start` so the rest of the pipeline picks up the new format.
+    fileprivate static func setInputDevice(
+        on inputNode: AVAudioInputNode, to deviceID: AudioObjectID
+    ) throws {
+        guard let unit = inputNode.audioUnit else {
+            throw MicCaptureError.engine("input node has no AudioUnit (cannot bind device)")
+        }
+        var dev = deviceID
+        let status = AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &dev,
+            UInt32(MemoryLayout<AudioObjectID>.size)
+        )
+        guard status == noErr else {
+            throw MicCaptureError.engine("AudioUnitSetProperty(CurrentDevice) failed: \(status)")
         }
     }
 }

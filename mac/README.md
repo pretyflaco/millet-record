@@ -9,7 +9,9 @@ the repo root).
 
 ## Status
 
-**M4.5b** (M4, M4.5b merged). Captures 5 seconds of dual-channel audio:
+**M5** (M4, M4.5b, M5 merged). Captures dual-channel audio for an
+unbounded duration; stop is driven by the parent process via a `q` byte
+on stdin (matching ffmpeg's stop convention) or by SIGINT/SIGTERM.
 
 - Microphone via `AVAudioEngine` input tap → **left** channel
 - System audio via Core Audio Process Tap → **right** channel
@@ -65,17 +67,105 @@ swift test
 Header-byte-level tests for the WAV writer don't touch Core Audio and pass
 on any macOS host (CI included).
 
-## Run the M4 prototype
+## CLI surface (M5)
+
+```
+meet-record-mac record \
+    --output <chunk.wav>
+    [--mic <"default" | "none" | <device-uid>>]
+    [--system <"system" | "none" | "app:<bundle-id>">]
+    [--sample-rate 16000]
+    [--max-seconds 0]
+
+meet-record-mac devices [--json]
+meet-record-mac probe-permissions
+meet-record-mac --version
+meet-record-mac --help
+```
+
+### Stop protocol (record mode)
+
+The recorder runs **open-ended** by default and stops on any of:
+
+- A single `q` (0x71) byte on stdin → `stop_reason: stdin-q`
+- EOF on stdin (parent closed the pipe) → `stop_reason: stdin-eof`
+- `SIGINT` (Ctrl-C / parent escalation) → `stop_reason: SIGINT`
+- `SIGTERM` (parent escalation) → `stop_reason: SIGTERM`
+- `--max-seconds N` cap if `N > 0` → `stop_reason: max-seconds`
+- `SIGKILL` — leaves a partial WAV with a stale RIFF size header
+
+Mirrors ffmpeg's "press q to quit" convention so the existing Python
+parent (`meet_record/capture.py:_stop_ffmpeg`) is a drop-in.
+
+### Run a quick smoke test
 
 ```sh
-./.build/release/meet-record-mac /tmp/sample.wav
+# 5-second recording, default mic, system-wide tap. The shell is the
+# parent here, so we just send the q byte after a sleep:
+( sleep 5 && printf 'q' ) | ./.build/release/meet-record-mac \
+    record --output /tmp/sample.wav
+
 ffprobe -hide_banner /tmp/sample.wav
 ```
 
-Expected output: a stereo 16 kHz s16le WAV of ~5 seconds. **Both** channels
-should now contain audio: left = microphone, right = system audio. Speak
-into your mic while music plays through your default output; both channels
-should have non-trivial RMS.
+Expected: stereo 16 kHz s16le WAV, both channels carrying audio (left =
+mic, right = system). The `done:` summary line on stderr reports
+`stop_reason: stdin-q`, frame counts, and the mic input format.
+
+Per-app capture:
+
+```sh
+# Tap only what Zoom is playing (other apps' audio not captured)
+./.build/release/meet-record-mac record \
+    --output /tmp/zoom.wav \
+    --system app:us.zoom.xos
+```
+
+Note: per-app tap requires the target app to have already touched the
+audio HAL since boot; newly-launched apps that haven't played any audio
+yet may not appear in the Process Tap process list.
+
+Mic-only or system-only:
+
+```sh
+# Mic only — right channel will be silence
+./.build/release/meet-record-mac record --output /tmp/mic.wav --system none
+
+# System only — left channel will be silence
+./.build/release/meet-record-mac record --output /tmp/sys.wav --mic none
+```
+
+### Enumerate devices
+
+```sh
+./.build/release/meet-record-mac devices --json
+```
+
+```json
+[
+  {
+    "uid": "BuiltInMicrophoneDevice",
+    "name": "MacBook Pro Microphone",
+    "is_default": true
+  },
+  ...
+]
+```
+
+The `uid` field is exactly what `--mic <uid>` accepts.
+
+### Probe TCC permissions
+
+```sh
+./.build/release/meet-record-mac probe-permissions
+# mic: granted
+# system_audio: granted
+# overall: ok
+```
+
+Exit code is `0` when both are granted, `1` otherwise. The system_audio
+probe attempts to create + immediately destroy a Process Tap; this
+triggers the macOS prompt on first use but does not record any audio.
 
 ## Permissions
 
@@ -92,13 +182,13 @@ System Settings → Privacy & Security → Microphone
                                      → System Audio Recording
 ```
 
-## Smoke test (modern ffmpeg syntax)
+## Per-channel level analysis (modern ffmpeg syntax)
 
 `-map_channel` was removed in ffmpeg 8.x; use `-af "pan=…"` instead.
 
 ```sh
 xattr -d com.apple.quarantine ./meet-record-mac
-./meet-record-mac /tmp/sample.wav
+( sleep 5 && printf 'q' ) | ./meet-record-mac record --output /tmp/sample.wav
 
 ffprobe -hide_banner /tmp/sample.wav
 # expect: pcm_s16le, 16000 Hz, 2 channels, s16, ~5 s

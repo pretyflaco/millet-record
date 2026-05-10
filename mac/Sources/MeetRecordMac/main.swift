@@ -1,21 +1,27 @@
-// main.swift — meet-record-mac M4
+// main.swift — meet-record-mac M5
 //
-// Captures 5 seconds of dual-channel audio:
-//   - Microphone via AVAudioEngine input tap   → left channel (L)
-//   - System audio via Core Audio Process Tap  → right channel (R)
-// Both streams are downmixed to 16 kHz mono Float32, paired by a
-// free-running ring-buffer Mixer with ~20 ms drain, soft-clipped via
-// tanh, and written as a stereo s16le 16 kHz WAV.
+// CLI dispatch + the long-running `record` loop. Subcommand surface is
+// defined in CLI.swift; this file decides what to do based on the
+// parsed invocation.
 //
-// Output contract is unchanged from M3 (stereo s16le 16 kHz WAV with
-// 44-byte standard header), only what's *in* the left channel changes:
-// M3 wrote zeros, M4 writes mic samples.
+// Subcommands:
+//   record [...]            — capture mic + system to a WAV
+//   devices [--json]        — enumerate input devices
+//   probe-permissions       — report TCC status (exit 0 ok / 1 blocked)
+//   --version               — print version
+//   --help                  — print usage
 //
-// Usage (M4):
-//   meet-record-mac <output.wav>
+// Stop protocol (record only):
+//   * `q` byte on stdin  → graceful flush + exit 0 (mirrors ffmpeg)
+//   * EOF on stdin       → graceful flush + exit 0 (parent closed pipe)
+//   * SIGINT             → graceful flush + exit 0
+//   * SIGTERM            → graceful flush + exit 0
+//   * SIGKILL            → no chance to flush; partial WAV with stale
+//                          RIFF size header
+//   * --max-seconds n    → cap; defaults to 0 (unlimited)
 //
-// CLI parsing, signal handling, q-byte stop protocol, status-fd, and
-// per-app capture selection all land in M5.
+// Output contract is unchanged from M4: stereo s16le 16 kHz WAV with
+// L = mic, R = system, 44-byte standard header.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -25,251 +31,326 @@ import AudioToolbox
 
 // macOS 14.4 is enforced by Package.swift's .macOS("14.4") platform pin.
 
-// MARK: - Argument parsing (intentionally trivial in M4)
+// MARK: - Subcommand dispatch
 
-let args = CommandLine.arguments
-guard args.count == 2 else {
-    FileHandle.standardError.write(Data("usage: meet-record-mac <output.wav>\n".utf8))
+let invocation: CLIInvocation
+do {
+    invocation = try CLI.parse(Array(CommandLine.arguments.dropFirst()))
+} catch let err as CLIError {
+    FileHandle.standardError.write(Data("error: \(err.description)\n".utf8))
+    FileHandle.standardError.write(Data("run `meet-record-mac --help` for usage.\n".utf8))
+    exit(2)
+} catch {
+    FileHandle.standardError.write(Data("error: \(error)\n".utf8))
     exit(2)
 }
-let outputURL = URL(fileURLWithPath: args[1])
 
-// MARK: - Constants + debug helper
+switch invocation {
+case .help:
+    print(CLI.usageText)
+    exit(0)
+case .version:
+    print(CLI.versionString)
+    exit(0)
+case .devices(let opts):
+    runDevices(opts)
+case .probePermissions:
+    runProbePermissions()
+case .record(let opts):
+    runRecord(opts)
+}
 
-let outputSampleRate: Double = 16_000
-let outputChannels: UInt16 = 2  // L=mic, R=system
+// MARK: - `devices`
 
-// MEET_RECORD_MAC_DEBUG=1 enables per-callback frame-count logging.
-// Used to localize duration drift bugs without an external ffprobe round-trip.
-let DEBUG_LOGGING = ProcessInfo.processInfo.environment["MEET_RECORD_MAC_DEBUG"] != nil
-
-@inline(__always)
-func debugLog(_ msg: @autoclosure () -> String) {
-    if DEBUG_LOGGING {
-        FileHandle.standardError.write(Data(msg().utf8))
+func runDevices(_ opts: DevicesOptions) -> Never {
+    do {
+        let rows = try Devices.listInputs()
+        FileHandle.standardOutput.write(Data(Devices.render(rows, json: opts.json).utf8))
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("error: devices enumeration failed: \(error)\n".utf8))
+        exit(1)
     }
 }
 
-// MEET_RECORD_MAC_MIC_GAIN=<float> overrides the default mic gain.
-// Default is `MicCapture.defaultGain` (= 4.0× as of M4.5b; closes the
-// Apple Silicon mic-vs-tap level gap that was blocking the downstream
-// channel-energy labeler). Set to 1.0 to reproduce M4.2 behavior (no
-// gain). See MicCapture.defaultGain doc for the full decision audit
-// and pretyflaco/meetscribe-record#6.
-let micGain = MicGain.gainFromEnvironment(
-    ProcessInfo.processInfo.environment,
-    defaultGain: MicCapture.defaultGain
-)
+// MARK: - `probe-permissions`
 
-// MARK: - WAV writer + Mixer
+func runProbePermissions() -> Never {
+    let report = Permissions.probe()
+    FileHandle.standardOutput.write(Data(Permissions.render(report).utf8))
+    exit(report.allGranted ? 0 : 1)
+}
 
-let writer: WavWriter
-do {
-    writer = try WavWriter(
-        url: outputURL,
-        sampleRate: UInt32(outputSampleRate),
-        channels: outputChannels
+// MARK: - `record` (the long-running data path)
+
+func runRecord(_ opts: RecordOptions) -> Never {
+    let outputURL = URL(fileURLWithPath: opts.outputPath)
+    let outputSampleRate = Double(opts.sampleRate)
+    let outputChannels: UInt16 = 2  // L=mic, R=system
+
+    // MEET_RECORD_MAC_DEBUG=1 enables per-callback frame-count logging.
+    let DEBUG_LOGGING = ProcessInfo.processInfo.environment["MEET_RECORD_MAC_DEBUG"] != nil
+    @inline(__always)
+    func debugLog(_ msg: @autoclosure () -> String) {
+        if DEBUG_LOGGING {
+            FileHandle.standardError.write(Data(msg().utf8))
+        }
+    }
+
+    // MEET_RECORD_MAC_MIC_GAIN=<float> overrides the default mic gain
+    // (`MicCapture.defaultGain` = 4.0× as of M4.5b). See MicCapture.swift
+    // and pretyflaco/meetscribe-record#6 for the decision audit.
+    let micGain = MicGain.gainFromEnvironment(
+        ProcessInfo.processInfo.environment,
+        defaultGain: MicCapture.defaultGain
     )
-} catch {
-    FileHandle.standardError.write(Data("error: failed to open output WAV: \(error)\n".utf8))
-    exit(1)
-}
 
-let mixer = Mixer(writer: writer)
-mixer.start()
-
-// MARK: - Process tap (system audio → right channel)
-
-// Reuse the M3 conversion path: tap delivers in its native format
-// (typically 44.1 / 48 kHz stereo float32); we downmix to 16 kHz mono and
-// push to mixer.pushSystem(...).
-
-let tap = ProcessTap()
-var sysConverter: AVAudioConverter?
-var sysSourceFormat: AVAudioFormat?
-
-let monoTargetFormat = AVAudioFormat(
-    commonFormat: .pcmFormatFloat32,
-    sampleRate: outputSampleRate,
-    channels: 1,
-    interleaved: false
-)!
-
-func handleTapBuffer(_ bufferList: AudioBufferList, _ asbd: AudioStreamBasicDescription) {
-    if sysSourceFormat == nil {
-        var asbdLocal = asbd
-        guard let fmt = AVAudioFormat(streamDescription: &asbdLocal) else {
-            FileHandle.standardError.write(Data("error: cannot construct AVAudioFormat from tap ASBD\n".utf8))
-            return
-        }
-        sysSourceFormat = fmt
-        sysConverter = AVAudioConverter(from: fmt, to: monoTargetFormat)
-        if sysConverter == nil {
-            FileHandle.standardError.write(Data("error: AVAudioConverter init failed (system → 16 kHz mono)\n".utf8))
-            return
-        }
+    // ─── WAV writer + Mixer ────────────────────────────────────────────────
+    let writer: WavWriter
+    do {
+        writer = try WavWriter(
+            url: outputURL,
+            sampleRate: UInt32(outputSampleRate),
+            channels: outputChannels
+        )
+    } catch {
+        FileHandle.standardError.write(Data("error: failed to open output WAV: \(error)\n".utf8))
+        exit(1)
     }
-    guard let sourceFormat = sysSourceFormat,
-          let converter = sysConverter else { return }
+    let mixer = Mixer(writer: writer)
+    mixer.start()
 
-    var mutableList = bufferList
-    let frameCapacity = AVAudioFrameCount(
-        Int(mutableList.mBuffers.mDataByteSize) / Int(sourceFormat.streamDescription.pointee.mBytesPerFrame)
-    )
-    guard frameCapacity > 0 else { return }
+    // ─── Stop coordination ────────────────────────────────────────────────
+    let stopController = StopController()
+    stopController.start()
 
-    guard let inputBuffer = AVAudioPCMBuffer(
-        pcmFormat: sourceFormat,
-        bufferListNoCopy: &mutableList,
-        deallocator: nil
-    ) else { return }
-    inputBuffer.frameLength = frameCapacity
-
-    let ratio = monoTargetFormat.sampleRate / sourceFormat.sampleRate
-    let outFrameCapacity = AVAudioFrameCount(Double(frameCapacity) * ratio + 64)
-
-    guard let outputBuffer = AVAudioPCMBuffer(
-        pcmFormat: monoTargetFormat,
-        frameCapacity: outFrameCapacity
-    ) else { return }
-
-    var fed = false
-    var error: NSError?
-    let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-        if fed {
-            outStatus.pointee = .noDataNow
-            return nil
-        }
-        fed = true
-        outStatus.pointee = .haveData
-        return inputBuffer
+    // ─── Banner ───────────────────────────────────────────────────────────
+    let micLabel: String
+    switch opts.mic {
+    case .default: micLabel = "default"
+    case .none: micLabel = "none"
+    case .deviceUID(let s): micLabel = "uid=\(s)"
     }
-
-    if status == .error || error != nil {
-        FileHandle.standardError.write(Data("warn: convert error: \(error?.localizedDescription ?? "unknown")\n".utf8))
-        return
+    let sysLabel: String
+    switch opts.system {
+    case .system: sysLabel = "system-wide"
+    case .none: sysLabel = "none"
+    case .appBundleID(let b): sysLabel = "app:\(b)"
     }
+    let maxLabel = opts.maxSeconds > 0 ? "max=\(opts.maxSeconds)s" : "max=∞"
+    FileHandle.standardError.write(Data(
+        "meet-record-mac M5 [mic=\(micLabel) system=\(sysLabel) gain=\(micGain)x \(maxLabel)] → \(outputURL.path)\n".utf8
+    ))
 
-    let outFrames = Int(outputBuffer.frameLength)
-    if outFrames == 0 { return }
-    guard let monoPtr = outputBuffer.floatChannelData?[0] else { return }
+    // ─── System audio (right channel) ──────────────────────────────────────
+    let monoTargetFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: outputSampleRate,
+        channels: 1,
+        interleaved: false
+    )!
 
-    mixer.pushSystem(monoPtr, count: outFrames)
+    var tap: ProcessTap?
+    var sysSilence: SyntheticSilence?
+    var sysConverter: AVAudioConverter?
+    var sysSourceFormat: AVAudioFormat?
 
-    debugLog("tap: outFrames=\(outFrames) cum=\(mixer.sysPushed) inFrames=\(frameCapacity) inFmt=\(sourceFormat.sampleRate)Hz/\(sourceFormat.channelCount)ch\n")
-}
-
-do {
-    try tap.start(handler: handleTapBuffer)
-} catch {
-    FileHandle.standardError.write(Data("error: failed to start tap: \(error)\n".utf8))
-    mixer.stopAndFlush()
-    try? writer.close()
-    exit(1)
-}
-
-// MARK: - Mic capture (mic → left channel)
-
-// Track when the first mic callback fires (relative to tap-start) so the
-// "done:" summary line can report mic warmup latency. AVAudioEngine input
-// has a known cold-start delay (~1-2 s on Apple Silicon); the value lets
-// us confirm Mixer.markMicReady() is being called at a sensible time.
-let recordingStartedAt = Date()
-let micFirstSeenLock = NSLock()
-var micFirstSeenAt: TimeInterval? = nil
-
-let mic = MicCapture(targetSampleRate: outputSampleRate, gain: micGain)
-do {
-    // MicCapture.start is @MainActor because AVAudioEngine input setup
-    // must happen on the main thread. Top-level main.swift code already
-    // runs on the main thread, so MainActor.assumeIsolated's runtime
-    // check (Thread.isMainThread) succeeds without dispatching.
-    try MainActor.assumeIsolated {
-        try mic.start { samples, count in
-            // First non-empty mic delivery: discard any pre-mic system
-            // audio that accumulated during AVAudioEngine cold start.
-            // markMicReady() is idempotent and lock-checked, so calling
-            // it on every callback is cheap after the first.
-            if count > 0 {
-                micFirstSeenLock.lock()
-                let isFirst = micFirstSeenAt == nil
-                if isFirst {
-                    micFirstSeenAt = Date().timeIntervalSince(recordingStartedAt)
-                }
-                micFirstSeenLock.unlock()
-                if isFirst {
-                    // M4.5: log mic source intel on the first delivery.
-                    // Static fields, so once is sufficient — keeps log volume
-                    // bounded while still surfacing the format every run.
-                    debugLog("mic_input: rate=\(mic.nativeSampleRate)Hz channels=\(mic.nativeChannelCount) inputVolume=\(mic.inputNodeVolume) gain=\(mic.gain)\n")
-                }
-                mixer.markMicReady()
+    func handleTapBuffer(_ bufferList: AudioBufferList, _ asbd: AudioStreamBasicDescription) {
+        if sysSourceFormat == nil {
+            var asbdLocal = asbd
+            guard let fmt = AVAudioFormat(streamDescription: &asbdLocal) else {
+                FileHandle.standardError.write(Data("error: cannot construct AVAudioFormat from tap ASBD\n".utf8))
+                return
             }
-            mixer.pushMic(samples, count: count)
-            debugLog("mic: outFrames=\(count) cum=\(mixer.micPushed)\n")
+            sysSourceFormat = fmt
+            sysConverter = AVAudioConverter(from: fmt, to: monoTargetFormat)
+            if sysConverter == nil {
+                FileHandle.standardError.write(Data("error: AVAudioConverter init failed (system → 16 kHz mono)\n".utf8))
+                return
+            }
         }
+        guard let sourceFormat = sysSourceFormat,
+              let converter = sysConverter else { return }
+
+        var mutableList = bufferList
+        let frameCapacity = AVAudioFrameCount(
+            Int(mutableList.mBuffers.mDataByteSize) / Int(sourceFormat.streamDescription.pointee.mBytesPerFrame)
+        )
+        guard frameCapacity > 0 else { return }
+
+        guard let inputBuffer = AVAudioPCMBuffer(
+            pcmFormat: sourceFormat,
+            bufferListNoCopy: &mutableList,
+            deallocator: nil
+        ) else { return }
+        inputBuffer.frameLength = frameCapacity
+
+        let ratio = monoTargetFormat.sampleRate / sourceFormat.sampleRate
+        let outFrameCapacity = AVAudioFrameCount(Double(frameCapacity) * ratio + 64)
+
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: monoTargetFormat,
+            frameCapacity: outFrameCapacity
+        ) else { return }
+
+        var fed = false
+        var error: NSError?
+        let status = converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+            if fed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            fed = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+        if status == .error || error != nil {
+            FileHandle.standardError.write(Data("warn: convert error: \(error?.localizedDescription ?? "unknown")\n".utf8))
+            return
+        }
+        let outFrames = Int(outputBuffer.frameLength)
+        if outFrames == 0 { return }
+        guard let monoPtr = outputBuffer.floatChannelData?[0] else { return }
+        mixer.pushSystem(monoPtr, count: outFrames)
+        debugLog("tap: outFrames=\(outFrames) cum=\(mixer.sysPushed) inFrames=\(frameCapacity) inFmt=\(sourceFormat.sampleRate)Hz/\(sourceFormat.channelCount)ch\n")
     }
-} catch {
-    FileHandle.standardError.write(Data("error: failed to start mic capture: \(error)\n".utf8))
-    tap.stop()
+
+    switch opts.system {
+    case .system:
+        let t = ProcessTap()
+        do {
+            try t.start(target: .systemWide, handler: handleTapBuffer)
+        } catch {
+            FileHandle.standardError.write(Data("error: failed to start system tap: \(error)\n".utf8))
+            mixer.stopAndFlush()
+            try? writer.close()
+            exit(1)
+        }
+        tap = t
+    case .appBundleID(let bid):
+        let t = ProcessTap()
+        do {
+            try t.start(target: .bundleID(bid), handler: handleTapBuffer)
+        } catch {
+            FileHandle.standardError.write(Data("error: failed to start per-app tap (\(bid)): \(error)\n".utf8))
+            mixer.stopAndFlush()
+            try? writer.close()
+            exit(1)
+        }
+        tap = t
+    case .none:
+        // Synthetic 16 kHz silence on the system channel so paired emits
+        // continue while mic produces real audio.
+        let s = SyntheticSilence(mixer: mixer, channel: .system, sampleRate: Int(outputSampleRate))
+        s.start()
+        sysSilence = s
+    }
+
+    // ─── Mic capture (left channel) ────────────────────────────────────────
+    let recordingStartedAt = Date()
+    let micFirstSeenLock = NSLock()
+    var micFirstSeenAt: TimeInterval? = nil
+
+    var mic: MicCapture?
+    var micSilence: SyntheticSilence?
+
+    switch opts.mic {
+    case .default, .deviceUID:
+        let uid: String?
+        if case .deviceUID(let u) = opts.mic { uid = u } else { uid = nil }
+        let m = MicCapture(targetSampleRate: outputSampleRate, gain: micGain, inputDeviceUID: uid)
+        do {
+            try MainActor.assumeIsolated {
+                try m.start { samples, count in
+                    if count > 0 {
+                        micFirstSeenLock.lock()
+                        let isFirst = micFirstSeenAt == nil
+                        if isFirst {
+                            micFirstSeenAt = Date().timeIntervalSince(recordingStartedAt)
+                        }
+                        micFirstSeenLock.unlock()
+                        if isFirst {
+                            debugLog("mic_input: rate=\(m.nativeSampleRate)Hz channels=\(m.nativeChannelCount) inputVolume=\(m.inputNodeVolume) gain=\(m.gain)\n")
+                        }
+                        mixer.markMicReady()
+                    }
+                    mixer.pushMic(samples, count: count)
+                    debugLog("mic: outFrames=\(count) cum=\(mixer.micPushed)\n")
+                }
+            }
+        } catch {
+            FileHandle.standardError.write(Data("error: failed to start mic capture: \(error)\n".utf8))
+            tap?.stop()
+            sysSilence?.stop()
+            mixer.stopAndFlush()
+            try? writer.close()
+            exit(1)
+        }
+        mic = m
+    case .none:
+        // Synthetic silence on the mic side. Mark mic ready immediately
+        // so the mixer doesn't sit waiting for a "real" mic warmup —
+        // there's no warmup to wait for in `--mic none` mode.
+        let s = SyntheticSilence(mixer: mixer, channel: .mic, sampleRate: Int(outputSampleRate))
+        s.start()
+        mixer.markMicReady()
+        micSilence = s
+    }
+
+    // ─── Block on stop signal ─────────────────────────────────────────────
+    let stopReason = stopController.wait(
+        timeout: opts.maxSeconds > 0 ? opts.maxSeconds : nil
+    )
+    FileHandle.standardError.write(Data(
+        "stopping: reason=\(stopReason.rawValue)\n".utf8
+    ))
+
+    // ─── Tear down ────────────────────────────────────────────────────────
+    mic?.stop()
+    micSilence?.stop()
+    tap?.stop()
+    sysSilence?.stop()
     mixer.stopAndFlush()
-    try? writer.close()
-    exit(1)
+
+    do {
+        try writer.close()
+    } catch {
+        FileHandle.standardError.write(Data("error: failed to close WAV: \(error)\n".utf8))
+        exit(1)
+    }
+
+    // ─── done: summary ────────────────────────────────────────────────────
+    let pairedFrames = mixer.framesEmitted
+    let durationSec = Double(pairedFrames) / outputSampleRate
+    micFirstSeenLock.lock()
+    let micWarmupSec = micFirstSeenAt
+    micFirstSeenLock.unlock()
+    let micWarmupStr = micWarmupSec.map { String(format: "%.3fs", $0) } ?? "n/a"
+    let micRateStr: String
+    let micChannelsStr: String
+    let micVolumeStr: String
+    let micGainStr: String
+    if let m = mic {
+        micRateStr = String(format: "%.1f", m.nativeSampleRate)
+        micChannelsStr = String(m.nativeChannelCount)
+        micVolumeStr = String(format: "%.3f", m.inputNodeVolume)
+        micGainStr = String(format: "%.3f", m.gain)
+    } else {
+        micRateStr = "0.0"
+        micChannelsStr = "0"
+        micVolumeStr = "0.000"
+        micGainStr = "0.000"
+    }
+    let summary = """
+    done: wrote \(pairedFrames) paired frames (~\(String(format: "%.2f", durationSec))s) to \(outputURL.path)
+      stop_reason:      \(stopReason.rawValue)
+      push counters:    mic=\(mixer.micPushed) sys=\(mixer.sysPushed)
+      emit counter:     paired=\(pairedFrames)
+      mic_first_seen:   \(micWarmupStr)
+      sys_discarded:    \(mixer.sysDiscardedAtMicReady)  (pre-mic system audio dropped by markMicReady)
+      mic_input:        rate=\(micRateStr)Hz channels=\(micChannelsStr) inputVolume=\(micVolumeStr) gain=\(micGainStr)
+
+    """
+    FileHandle.standardError.write(Data(summary.utf8))
+    exit(0)
 }
-
-// MARK: - Run
-
-let captureSeconds: TimeInterval = 5.0
-FileHandle.standardError.write(Data(
-    "meet-record-mac M4.5b (mic gain default \(MicCapture.defaultGain)x): capturing \(Int(captureSeconds))s of mic+system audio → \(outputURL.path)\n".utf8
-))
-
-Thread.sleep(forTimeInterval: captureSeconds)
-
-mic.stop()
-tap.stop()
-mixer.stopAndFlush()
-
-do {
-    try writer.close()
-} catch {
-    FileHandle.standardError.write(Data("error: failed to close WAV: \(error)\n".utf8))
-    exit(1)
-}
-
-// Restore the M3-style "done:" line and extend it with push/emit counters
-// so duration drift is visible from the run output alone (no ffprobe needed).
-//
-// Interpretation guide for future debugging:
-//   paired ≈ wall_clock * 16000          → recording is correctly real-time
-//   paired ≈ min(mic_push, sys_push)     → drainOnce is using min-semantics correctly
-//   paired ≫ min(mic_push, sys_push)     → mixer is over-emitting (was the M4 bug:
-//                                          old max(...) + zero-pad inflated by ~2×)
-//   sys_discarded > 0                    → markMicReady() ran; pre-mic system audio
-//                                          was dropped (expected: AVAudioEngine has
-//                                          ~1-2 s cold-start latency on Apple Silicon)
-let pairedFrames = mixer.framesEmitted
-let durationSec = Double(pairedFrames) / outputSampleRate
-micFirstSeenLock.lock()
-let micWarmupSec = micFirstSeenAt
-micFirstSeenLock.unlock()
-let micWarmupStr = micWarmupSec.map { String(format: "%.3fs", $0) } ?? "never"
-let summary = String(
-    format: """
-    done: wrote %d paired frames (~%.2fs) to %@
-      push counters:    mic=%d sys=%d
-      emit counter:     paired=%d
-      mic_first_seen:   %@
-      sys_discarded:    %d  (pre-mic system audio dropped by markMicReady)
-      mic_input:        rate=%.1fHz channels=%d inputVolume=%.3f gain=%.3f
-
-    """,
-    pairedFrames, durationSec, outputURL.path,
-    mixer.micPushed, mixer.sysPushed,
-    pairedFrames,
-    micWarmupStr,
-    mixer.sysDiscardedAtMicReady,
-    mic.nativeSampleRate, mic.nativeChannelCount, mic.inputNodeVolume, mic.gain
-)
-FileHandle.standardError.write(Data(summary.utf8))
-exit(0)
