@@ -516,11 +516,32 @@ class RecordingSession:
         else:
             cmd = self._build_ffmpeg_cmd(chunk_path)
 
+        # start_new_session=True moves the recorder into its own POSIX
+        # session (setsid), detaching it from the parent's process group.
+        # Without this, a terminal SIGINT (Ctrl-C) is delivered to BOTH
+        # the Python parent and the recorder simultaneously, racing with
+        # the parent's intent-to-stop being translated into a `b"q"`
+        # write via `_stop_ffmpeg`. The recorder exits first via the
+        # signal (clean exit code 0); the parent's watchdog sees an
+        # unexpected exit and triggers a spurious restart cycle —
+        # observed in @patternn's M6c.ii integration round as
+        # `restart_count: 1`, `chunk_count: 2`, with Chunk 0
+        # `stop_reason: SIGINT` and Chunk 1 `stop_reason: stdin-q`.
+        #
+        # With this flag, terminal SIGINT only reaches the Python
+        # parent; the parent's Click `KeyboardInterrupt` handler then
+        # runs `_stop_ffmpeg` cleanly via the q-byte ladder.
+        #
+        # Applies to both backends: ffmpeg (Linux) also exits cleanly
+        # on SIGINT, so the Linux path had the same latent bug — just
+        # less visible because ffmpeg's startup cost is lower than the
+        # sidecar's ~0.2 s AVAudioEngine warmup. Fixed for both here.
         self._ffmpeg_proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=self._ffmpeg_log,
+            start_new_session=True,
         )
 
         # Wait for ffmpeg to start producing audio data.
