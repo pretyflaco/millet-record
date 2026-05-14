@@ -59,6 +59,24 @@ under the same `meet` command via Click entry-points.
 plus its own heavy modules (transcribe, label, voiceprint, summarize,
 sync, pdf, gui).
 
+## macOS (Apple Silicon)
+
+`pip install meetscribe-record` on macOS 14.4+ Apple Silicon ships a
+bundled `meet-record-mac` Swift sidecar that captures via Core Audio
+Process Tap + AVAudioEngine — no PulseAudio, no BlackHole, no extra
+install. `meet record` uses it by default as of 0.2.0.
+
+First run prompts for Microphone and System Audio Recording permissions
+via the standard macOS TCC dialogs; both are required for full dual-
+channel capture (mic on left, system on right). See
+[`mac/README.md`](mac/README.md) for the sidecar's CLI surface, level
+analysis recipes, and environment variables.
+
+Set `MEET_RECORD_MAC=0` to force the legacy ffmpeg+PulseAudio path
+(diagnostic kill switch only — that path will fail on a stock macOS
+install because there is no PulseAudio device). Intel Macs and
+macOS < 14.4 are unsupported.
+
 ## License
 
 GPL-3.0-or-later, same as parent meetscribe.

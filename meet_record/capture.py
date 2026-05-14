@@ -6,9 +6,11 @@ system audio (remote participants) on the other.
 Backends:
 - Linux: ffmpeg with PulseAudio/PipeWire monitor sources (default).
 - macOS 14.4+ Apple Silicon: meet-record-mac (Swift sidecar) using
-  Core Audio Process Tap + AVAudioEngine. Opt-in via MEET_RECORD_MAC=1
-  during the M6 transitional window; flips ON by default after the
-  M6c.ii integration round.
+  Core Audio Process Tap + AVAudioEngine. Default backend on darwin
+  as of 0.2.0 (post-M6c.ii.b sign-off). Set MEET_RECORD_MAC=0 to
+  force the legacy ffmpeg+PulseAudio path (which fails on macOS
+  because there is no PulseAudio device — the var is primarily a
+  diagnostic kill switch).
 
 Reliability features (apply to either backend):
 - subprocess stderr goes to a log file (prevents pipe buffer deadlock)
@@ -61,9 +63,19 @@ _BYTES_PER_SECOND = _SAMPLE_RATE * _CHANNELS * _BYTES_PER_SAMPLE  # 64000
 
 # ─── macOS sidecar (M6a) ─────────────────────────────────────────────────────
 
-# Env var that opts the darwin branch IN during the M6 transitional window.
-# After M6c.ii integration round signs off, a follow-up PR will flip the
-# default ON for darwin and demote this var to an opt-OUT (set to "0").
+# Env var that controls whether the macOS sidecar backend is used.
+#
+# As of 0.2.0 (post-M6c.ii.b sign-off, 2026-05-14) the sidecar is ON by
+# default on darwin. Set MEET_RECORD_MAC=0 to force the legacy
+# ffmpeg+PulseAudio path. That path will fail on a stock macOS install
+# (no PulseAudio device); the env var primarily exists as a diagnostic
+# kill switch — for cross-checking against pre-0.2.0 behavior with a
+# manually-installed PulseAudio, or for narrowing down a sidecar bug
+# during investigation.
+#
+# The constant name is kept as `_DARWIN_OPT_IN_ENV` for git-blame
+# continuity through the M6c.ii arc; the semantics flipped to opt-OUT
+# in M6c.ii.c. Internal symbol; no public API surface depends on it.
 _DARWIN_OPT_IN_ENV = "MEET_RECORD_MAC"
 
 # Env var that overrides the path to the Swift sidecar binary. Primarily
@@ -115,14 +127,19 @@ def _resolve_darwin_recorder() -> Path:
 def _darwin_backend_enabled() -> bool:
     """True iff the macOS sidecar backend should be used.
 
-    Gated by ``MEET_RECORD_MAC=1`` during the M6 transitional window.
-    Any other value (unset, "0", "no", empty) keeps the legacy ffmpeg+
-    PulseAudio path so a Mac user with a default install sees no
-    behavior change until they explicitly opt in.
+    Default-ON on darwin as of 0.2.0 (M6c.ii.c, post-patternn M6c.ii.b
+    sign-off). Set ``MEET_RECORD_MAC=0`` to force the legacy ffmpeg+
+    PulseAudio path; any other value (unset, "1", "yes", empty string,
+    typos) keeps the sidecar enabled so an accidentally-misset value
+    fails open into the working backend on macOS.
+
+    Linux / other platforms always return False — no behavior change
+    on those platforms; the legacy ffmpeg+PulseAudio path is the only
+    backend they have.
     """
     if sys.platform != "darwin":
         return False
-    return os.environ.get(_DARWIN_OPT_IN_ENV, "").strip() == "1"
+    return os.environ.get(_DARWIN_OPT_IN_ENV, "").strip() != "0"
 
 
 # ─── Data classes ────────────────────────────────────────────────────────────
