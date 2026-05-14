@@ -132,29 +132,45 @@ def test_backend_disabled_on_linux(monkeypatch):
     assert cap._darwin_backend_enabled() is False
 
 
-def test_backend_disabled_on_darwin_without_env(monkeypatch):
+def test_backend_enabled_on_darwin_without_env(monkeypatch):
+    """Default-ON on darwin as of 0.2.0 (M6c.ii.c)."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.delenv("MEET_RECORD_MAC", raising=False)
-    assert cap._darwin_backend_enabled() is False
+    assert cap._darwin_backend_enabled() is True
 
 
 def test_backend_enabled_on_darwin_with_env(monkeypatch):
+    """MEET_RECORD_MAC=1 still yields True (redundant with default but
+    backward-compatible with anyone who scripted the M6 opt-in)."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("MEET_RECORD_MAC", "1")
     assert cap._darwin_backend_enabled() is True
 
 
-@pytest.mark.parametrize("value", ["", "0", "no", "false", "yes", "true", "2"])
-def test_backend_only_recognizes_literal_one(monkeypatch, value):
-    """Anything other than literal "1" leaves the legacy path active.
+def test_backend_disabled_on_darwin_with_zero(monkeypatch):
+    """Opt-OUT: MEET_RECORD_MAC=0 forces the legacy ffmpeg path.
 
-    Conservative: we want the env var to be a strict opt-in gate during
-    M6, not a fuzzy-match. Off-by-default is the right failure mode if
-    a user mistypes.
+    On macOS this path will fail at startup (no PulseAudio device);
+    the env var is a diagnostic kill switch, not a recommended config.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("MEET_RECORD_MAC", "0")
+    assert cap._darwin_backend_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["", "1", "yes", "true", "2", "no", "false"])
+def test_backend_only_zero_disables(monkeypatch, value):
+    """Anything other than literal "0" leaves the sidecar enabled.
+
+    Fail-open: if a user mistypes the env var, the working backend
+    on macOS stays in use rather than falling back to the broken-on-
+    darwin ffmpeg+PulseAudio path. The strict "0"-only opt-OUT
+    mirrors the fail-open rationale documented in
+    `_darwin_backend_enabled`.
     """
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("MEET_RECORD_MAC", value)
-    assert cap._darwin_backend_enabled() is False
+    assert cap._darwin_backend_enabled() is True
 
 
 # ─── _build_recorder_cmd_darwin (argv shape) ─────────────────────────────────
@@ -460,10 +476,15 @@ def test_e2e_stall_triggers_watchdog_restart(monkeypatch, tmp_path, darwin_envir
 
 @pytest.mark.timeout(15)
 def test_e2e_opt_out_falls_through_to_ffmpeg_branch(monkeypatch, tmp_path):
-    """When MEET_RECORD_MAC is unset on darwin, _start_ffmpeg_chunk
-    builds the legacy ffmpeg argv. We verify by intercepting Popen."""
+    """When MEET_RECORD_MAC=0 on darwin, _start_ffmpeg_chunk builds the
+    legacy ffmpeg argv. We verify by intercepting Popen.
+
+    Updated for M6c.ii.c: the gate is now opt-OUT, so the explicit "0"
+    is required to reach the ffmpeg branch on darwin. Pre-0.2.0 this
+    test relied on the env var being unset (the legacy default).
+    """
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.delenv("MEET_RECORD_MAC", raising=False)
+    monkeypatch.setenv("MEET_RECORD_MAC", "0")
 
     s = cap.RecordingSession(
         output_dir=tmp_path,

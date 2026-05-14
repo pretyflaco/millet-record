@@ -295,7 +295,10 @@ def darwin_environ(monkeypatch, fake_recorder_factory):
 
     Sets, for the duration of the test:
       sys.platform           → "darwin"
-      MEET_RECORD_MAC        → "1"   (opt-in gate)
+      MEET_RECORD_MAC        → "1"   (redundant since 0.2.0 default-ON;
+                                      kept as an explicit signal in tests
+                                      so a future re-flip of the gate
+                                      doesn't silently bypass coverage)
       MEET_RECORD_MAC_PATH   → path to a freshly-generated mock recorder
 
     Yields the mock recorder path so tests can inspect it (e.g. the

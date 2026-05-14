@@ -9,9 +9,17 @@ the repo root).
 
 ## Status
 
-**M5** (M4, M4.5b, M5 merged). Captures dual-channel audio for an
-unbounded duration; stop is driven by the parent process via a `q` byte
-on stdin (matching ffmpeg's stop convention) or by SIGINT/SIGTERM.
+**Default macOS recording backend** as of `meetscribe-record` 0.2.0
+(M6c.ii.c, post-patternn M6c.ii.b sign-off). `meet record` shells out
+to this binary on darwin without any opt-in env var; set
+`MEET_RECORD_MAC=0` from `meetscribe-record`'s parent process to force
+the legacy ffmpeg+PulseAudio path (which fails on a stock macOS
+install — the var is a diagnostic kill switch, not a recommended
+config).
+
+Captures dual-channel audio for an unbounded duration; stop is driven
+by the parent process via a `q` byte on stdin (matching ffmpeg's stop
+convention) or by SIGINT/SIGTERM.
 
 - Microphone via `AVAudioEngine` input tap → **left** channel
 - System audio via Core Audio Process Tap → **right** channel
@@ -210,6 +218,25 @@ normal speech. Concrete absolute levels depend on your hardware and
 input slider setting.
 
 ## Environment variables
+
+These variables are read by `meet_record.capture` (the Python parent),
+not by the sidecar binary itself, except `MEET_RECORD_MAC_DEBUG` and
+`MEET_RECORD_MAC_MIC_GAIN` which the sidecar reads directly.
+
+- **`MEET_RECORD_MAC=0`** — opt out of the sidecar and force
+  `meet_record.capture` back to the legacy ffmpeg+PulseAudio path.
+  Diagnostic kill switch: that path fails on a stock macOS install
+  (no PulseAudio device), so this is for narrowing down a sidecar
+  bug or cross-checking against pre-0.2.0 behavior with a manually
+  installed PulseAudio. Any other value (unset, "1", "yes", typos)
+  keeps the sidecar enabled — fail-open into the working backend.
+
+- **`MEET_RECORD_MAC_PATH=<path>`** — override the resolved path to
+  the `meet-record-mac` binary. Resolution order is
+  `MEET_RECORD_MAC_PATH` → `meet_record/_bin/meet-record-mac` (the
+  pip-installed bundle location) → `meet-record-mac` on `PATH`.
+  Useful for running a `swift build` artefact against a pip-installed
+  package, or for pointing the test suite at a mock recorder.
 
 - **`MEET_RECORD_MAC_DEBUG=1`** — emit per-callback frame counts to
   stderr. Useful for tracing the mic and system push streams sample-
