@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -140,6 +141,37 @@ def _darwin_backend_enabled() -> bool:
     if sys.platform != "darwin":
         return False
     return os.environ.get(_DARWIN_OPT_IN_ENV, "").strip() != "0"
+
+
+# ─── Log parsers ─────────────────────────────────────────────────────────────
+
+
+_STOP_REASON_RE = re.compile(r"^\s*stop_reason:\s*(\S+)", re.MULTILINE)
+
+
+def _extract_last_stop_reason(log_path: Path) -> str:
+    """Return the final ``stop_reason: <value>`` recorded in *log_path*.
+
+    Both the macOS sidecar (meet-record-mac) and the Linux ffmpeg
+    wrapper emit a ``stop_reason: <value>`` line per chunk into the
+    shared ``.ffmpeg.log``. A multi-chunk session ends with the *last*
+    such line (the reason the final chunk terminated, i.e. the reason
+    the session as a whole ended).
+
+    Returns ``"unknown"`` if the log is missing or contains no
+    ``stop_reason:`` line (e.g. hard crash before the recorder
+    flushed its summary, or a non-darwin-non-ffmpeg backend that
+    doesn't emit the line).
+    """
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return "unknown"
+
+    matches = _STOP_REASON_RE.findall(text)
+    if not matches:
+        return "unknown"
+    return matches[-1]
 
 
 # ─── Data classes ────────────────────────────────────────────────────────────
@@ -324,6 +356,21 @@ class RecordingSession:
         self._metadata["file_exists"] = self.output_file.exists()
         if self.output_file.exists():
             self._metadata["file_size_bytes"] = self.output_file.stat().st_size
+
+        # F7 fix (M8, reported by @patternn 2026-05-17): propagate
+        # ``stop_reason`` from the recorder log into session.json.
+        # The recorder (Mac sidecar via meet-record-mac, Linux via ffmpeg)
+        # prints a ``stop_reason: <value>`` line per chunk into the shared
+        # ``.ffmpeg.log`` file. Previously we never lifted it back into
+        # the metadata, so downstream code couldn't tell whether the
+        # recording ended via stdin-q (the clean path) or SIGINT /
+        # SIGTERM / max-seconds / stdin-eof. Take the *last* such line
+        # in the log (i.e. the final chunk's stop reason — the one
+        # that ended the session as a whole). Falls back to "unknown"
+        # if the log is missing or holds no stop_reason line (e.g.
+        # hard crash before the recorder flushed its summary).
+        log_path = self.output_file.with_suffix(".ffmpeg.log")
+        self._metadata["stop_reason"] = _extract_last_stop_reason(log_path)
 
         meta_file = self.output_file.with_suffix(".session.json")
         meta_file.write_text(json.dumps(self._metadata, indent=2))

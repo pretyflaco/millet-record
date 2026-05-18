@@ -431,6 +431,9 @@ def test_e2e_normal_recording_stops_via_q_byte(monkeypatch, tmp_path, darwin_env
         signal escalation is needed.
       * The chunk gets renamed to the final output_file.
       * Session metadata (.session.json) is written with file_exists=True.
+      * session.json carries ``stop_reason: stdin-q`` (F7, M8): the mock
+        prints the field on cleanup, capture.py parses the shared
+        .ffmpeg.log for it.
     """
     s = cap.create_session(output_dir=tmp_path, filename="meeting.wav")
     s.start()
@@ -442,6 +445,23 @@ def test_e2e_normal_recording_stops_via_q_byte(monkeypatch, tmp_path, darwin_env
     assert out.stat().st_size > 1024
     assert not s._failed
     assert s._restart_count == 0
+
+    # F7: session.json must carry stop_reason. With the normal mock,
+    # the q-byte path is taken on stop(), and the mock emits
+    # ``stop_reason: stdin-q`` on its way out.
+    import json as _json
+    meta_path = (tmp_path / "meeting.wav").with_suffix(".session.json")
+    assert meta_path.exists()
+    meta = _json.loads(meta_path.read_text())
+    assert "stop_reason" in meta, (
+        "session.json must carry stop_reason (F7, reported by @patternn in M8)"
+    )
+    assert meta["stop_reason"] == "stdin-q", (
+        f"expected stop_reason='stdin-q' (q-byte path); got {meta['stop_reason']!r}. "
+        "If this fails, check whether the mock cleanup function is emitting "
+        "the line to stderr, and that capture.py's log handle was closed "
+        "before _extract_last_stop_reason ran."
+    )
 
 
 @pytest.mark.timeout(45)
@@ -532,3 +552,47 @@ def test_virtual_sink_refused_on_darwin(monkeypatch, tmp_path, darwin_environ):
     )
     with pytest.raises(RuntimeError, match="not supported on the macOS sidecar"):
         s.start()
+
+
+# ─── F7 (M8): _extract_last_stop_reason unit tests ──────────────────────────
+
+
+def test_extract_last_stop_reason_picks_final_match(tmp_path):
+    """Multi-chunk log → last stop_reason wins."""
+    log = tmp_path / "x.ffmpeg.log"
+    log.write_text(
+        """
+--- Chunk 0 started at 2026-05-17T15:35:41.035314 ---
+done: wrote 100 paired frames
+  stop_reason:      SIGINT
+  push counters:    mic=100 sys=100
+
+--- Chunk 1 started at 2026-05-17T15:35:42.135 ---
+done: wrote 200 paired frames
+  stop_reason:      stdin-q
+  push counters:    mic=200 sys=200
+"""
+    )
+    assert cap._extract_last_stop_reason(log) == "stdin-q"
+
+
+def test_extract_last_stop_reason_single_chunk(tmp_path):
+    """Single chunk → that reason is returned."""
+    log = tmp_path / "x.ffmpeg.log"
+    log.write_text(
+        "--- Chunk 0 started at 2026-05-17T15:35:41.035314 ---\n"
+        "  stop_reason:      max-seconds\n"
+    )
+    assert cap._extract_last_stop_reason(log) == "max-seconds"
+
+
+def test_extract_last_stop_reason_missing_log_returns_unknown(tmp_path):
+    """Missing log file → 'unknown' (e.g. backend that doesn't emit the line)."""
+    assert cap._extract_last_stop_reason(tmp_path / "does-not-exist.log") == "unknown"
+
+
+def test_extract_last_stop_reason_log_without_field_returns_unknown(tmp_path):
+    """Log exists but holds no stop_reason line → 'unknown'."""
+    log = tmp_path / "x.ffmpeg.log"
+    log.write_text("--- Chunk 0 started ---\nsome unrelated content\n")
+    assert cap._extract_last_stop_reason(log) == "unknown"

@@ -220,17 +220,27 @@ case "$behavior" in
 esac
 
 # Cleanup function — finalize header and exit cleanly.
+# Accepts a single argument that becomes the ``stop_reason:`` line
+# written to stderr (which capture.py captures into the shared
+# ``.ffmpeg.log``). The real meet-record-mac sidecar prints the same
+# field as part of its end-of-chunk summary block (see
+# mac/Sources/MeetRecordMac/main.swift); F7 (M8) added a parser in
+# capture.py that lifts it into session.json, so the mock must emit
+# something for the e2e tests to exercise the field.
 cleanup() {
     if [ -n "$growth_pid" ]; then
         kill "$growth_pid" 2>/dev/null || :
         wait "$growth_pid" 2>/dev/null || :
     fi
     finalize_header
+    local reason="${1:-stdin-q}"
+    printf '  stop_reason:      %s\n' "$reason" >&2
     exit 0
 }
 
 # Signal traps (graceful stop on parent escalation).
-trap cleanup INT TERM
+trap 'cleanup SIGINT' INT
+trap 'cleanup SIGTERM' TERM
 
 # crash_after behavior: schedule a non-graceful exit.
 if [ "$behavior" = "crash_after" ]; then
@@ -248,12 +258,12 @@ fi
 # stop. Any other byte → keep reading.
 while IFS= read -r -n 1 c; do
     if [ "$c" = "q" ]; then
-        cleanup
+        cleanup stdin-q
     fi
 done
 
-# Reached EOF on stdin → graceful stop, same as q.
-cleanup
+# Reached EOF on stdin → graceful stop, same as q (but different reason).
+cleanup stdin-eof
 """
 
 
