@@ -37,6 +37,7 @@ enum CLIInvocation: Equatable {
     case record(RecordOptions)
     case devices(DevicesOptions)
     case probePermissions
+    case requestPermissions
     case version
     case help
 }
@@ -146,6 +147,9 @@ enum CLI {
         devices                 List available audio input devices.
         probe-permissions       Report mic + system-audio TCC status (exit 0
                                 if both granted, 1 otherwise).
+        request-permissions     Request mic + system-audio TCC access. Triggers
+                                the macOS permission dialog on first use; then
+                                reports status. Idempotent.
 
     GLOBAL FLAGS:
         --version               Print version and exit.
@@ -182,7 +186,7 @@ enum CLI {
 
     /// Build version string. Surface-stable so the Python parent can
     /// version-check its known-good binary.
-    static let versionString = "meet-record-mac 0.5.0 (M5)"
+    static let versionString = "meet-record-mac 0.6.0 (M7)"
 
     static func parse(_ args: [String]) throws -> CLIInvocation {
         // Top-level "global-only" flags first.
@@ -212,6 +216,12 @@ enum CLI {
                 throw CLIError.unknownFlag(subcommand: "probe-permissions", flag: a)
             }
             return .probePermissions
+        case "request-permissions":
+            // No flags; reject any.
+            for a in rest {
+                throw CLIError.unknownFlag(subcommand: "request-permissions", flag: a)
+            }
+            return .requestPermissions
         case "--help", "-h":
             return .help
         case "--version":

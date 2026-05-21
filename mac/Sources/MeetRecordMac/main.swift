@@ -56,6 +56,8 @@ case .devices(let opts):
     runDevices(opts)
 case .probePermissions:
     runProbePermissions()
+case .requestPermissions:
+    runRequestPermissions()
 case .record(let opts):
     runRecord(opts)
 }
@@ -78,6 +80,28 @@ func runDevices(_ opts: DevicesOptions) -> Never {
 func runProbePermissions() -> Never {
     let report = Permissions.probe()
     FileHandle.standardOutput.write(Data(Permissions.render(report).utf8))
+    exit(report.allGranted ? 0 : 1)
+}
+
+// MARK: - `request-permissions`
+
+func runRequestPermissions() -> Never {
+    let report = Permissions.requestAndProbe()
+    FileHandle.standardOutput.write(Data(Permissions.render(report).utf8))
+    if !report.allGranted {
+        FileHandle.standardError.write(Data(
+            """
+            Tip: grant permissions in System Settings → Privacy & Security:
+              • Microphone → enable for your terminal app
+              • System Audio Recording → enable for your terminal app
+            On macOS Sequoia+, apps only appear in these lists after they
+            first request access. If your terminal is missing, try:
+              tccutil reset Microphone
+              tccutil reset SystemAudioRecording
+            then re-run this command.\n
+            """.utf8
+        ))
+    }
     exit(report.allGranted ? 0 : 1)
 }
 

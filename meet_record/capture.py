@@ -1012,28 +1012,35 @@ def check_prerequisites() -> list[str]:
             issues.append(str(e))
             return issues
 
-        # Permission probe — sidecar exit 0 means both mic + system-audio
-        # are granted. Non-zero exit yields the human-readable status
-        # lines verbatim, which are useful for diagnosing which bucket
-        # is blocked.
+        # Permission request — sidecar exit 0 means both mic + system-
+        # audio are granted. On first run, `request-permissions` triggers
+        # the macOS TCC dialog so the user can grant access interactively
+        # (unlike `probe-permissions` which only reads the status).
+        # Non-zero exit yields human-readable status lines verbatim.
         try:
             result = subprocess.run(
-                [str(recorder), "probe-permissions"],
+                [str(recorder), "request-permissions"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
             )
             if result.returncode != 0:
                 issues.append(
                     "macOS audio permissions not granted:\n"
                     + result.stdout.strip()
-                    + "\n  Grant via System Settings → Privacy & Security → "
-                    "Microphone, and → System Audio Recording."
+                    + "\n  Grant via System Settings → Privacy & Security →"
+                    " Microphone, and → System Audio Recording."
+                    "\n  On macOS Sequoia+, if your terminal app is not"
+                    " listed, run:\n"
+                    "    tccutil reset Microphone\n"
+                    "    tccutil reset SystemAudioRecording\n"
+                    "  then retry."
                 )
         except subprocess.TimeoutExpired:
             issues.append(
-                f"meet-record-mac probe-permissions timed out (>10 s); "
-                f"binary at {recorder} may be hung."
+                f"meet-record-mac request-permissions timed out (>30 s); "
+                f"binary at {recorder} may be hung or waiting for a "
+                f"permission dialog behind other windows."
             )
         except OSError as e:
             issues.append(f"Cannot run meet-record-mac: {e}")

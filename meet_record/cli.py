@@ -322,8 +322,12 @@ def check():
             click.echo(f"  - {issue}")
         sys.exit(1)
     else:
-        click.echo("  ffmpeg:           OK")
-        click.echo("  PulseAudio/PipeWire: OK")
+        click.echo("  ffmpeg:              OK")
+        if sys.platform == "darwin":
+            click.echo("  mic permission:      OK")
+            click.echo("  system audio perm:   OK")
+        else:
+            click.echo("  PulseAudio/PipeWire: OK")
 
     # Probe optional offline-only deps without requiring them.
     click.echo()

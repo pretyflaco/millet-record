@@ -13,4 +13,4 @@ Version is the single source of truth here; pyproject.toml's
 [project] section pulls it dynamically via setuptools.dynamic.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"

@@ -11,7 +11,7 @@ These tests exercise:
 * ``_darwin_backend_enabled``: opt-in gate semantics.
 * ``_build_recorder_cmd_darwin``: argv shape regression-gates the M5
   CLI surface (--mic / --system / --sample-rate / --max-seconds).
-* ``check_prerequisites`` darwin branch: probe-permissions plumbing
+* ``check_prerequisites`` darwin branch: request-permissions plumbing
   and ffmpeg presence.
 * End-to-end ``RecordingSession.start() / stop()``: watchdog-against-
   mock semantics for the normal, stall, and opt-out-fallthrough cases.
@@ -358,7 +358,7 @@ def test_create_session_explicit_overrides_win(monkeypatch, tmp_path, darwin_env
 
 
 def test_check_prerequisites_passes_when_perms_granted(monkeypatch, darwin_environ):
-    """probe-permissions exit 0 from mock → no issues from that check."""
+    """request-permissions exit 0 from mock → no issues from that check."""
     monkeypatch.setenv("MOCK_BEHAVIOR", "normal")
 
     # Stub ffmpeg presence so the test doesn't depend on PATH.
@@ -381,7 +381,7 @@ def test_check_prerequisites_passes_when_perms_granted(monkeypatch, darwin_envir
 
 
 def test_check_prerequisites_reports_perm_denial(monkeypatch, darwin_environ):
-    """probe-permissions exit 1 from mock → an issue is reported with the
+    """request-permissions exit 1 from mock → an issue is reported with the
     sidecar's stdout content embedded."""
     monkeypatch.setenv("MOCK_BEHAVIOR", "deny_perms")
 

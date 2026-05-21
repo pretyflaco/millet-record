@@ -1,7 +1,15 @@
 // Permissions.swift
 //
 // `meet-record-mac probe-permissions` — report TCC status for the two
-// permissions the recorder needs:
+// permissions the recorder needs.
+//
+// `meet-record-mac request-permissions` — like probe, but calls
+// `AVCaptureDevice.requestAccess(for: .audio)` when the mic status is
+// `.notDetermined`, triggering the macOS TCC dialog so the user can
+// grant access interactively. Idempotent: already-granted or
+// already-denied states return immediately without UI.
+//
+// Permissions needed:
 //
 //   1. Microphone (`AVCaptureDevice.authorizationStatus(for: .audio)`)
 //   2. System Audio Recording — the new TCC bucket macOS 14.4
@@ -77,6 +85,16 @@ enum Permissions {
         """
     }
 
+    /// Request mic access (triggers the system prompt when status is
+    /// `.notDetermined`) then re-probe system audio. Returns a full
+    /// report. Idempotent: if already granted/denied, the prompt does
+    /// not appear.
+    static func requestAndProbe() -> Report {
+        let mic = requestMic()
+        let sys = probeSystemAudio()
+        return Report(mic: mic, systemAudio: sys)
+    }
+
     // MARK: - probes
 
     private static func probeMic() -> Status {
@@ -85,6 +103,32 @@ enum Permissions {
         case .denied: return .denied
         case .notDetermined: return .not_determined
         case .restricted: return .restricted
+        @unknown default: return .unknown
+        }
+    }
+
+    // MARK: - requests
+
+    /// Request microphone access via the Apple-recommended API. When
+    /// the TCC status is `.notDetermined`, this triggers the system
+    /// permission dialog and blocks until the user responds. When
+    /// already `.authorized` or `.denied`, returns immediately without
+    /// showing any UI.
+    private static func requestMic() -> Status {
+        let current = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch current {
+        case .authorized: return .granted
+        case .denied: return .denied
+        case .restricted: return .restricted
+        case .notDetermined:
+            let semaphore = DispatchSemaphore(value: 0)
+            var granted = false
+            AVCaptureDevice.requestAccess(for: .audio) { result in
+                granted = result
+                semaphore.signal()
+            }
+            semaphore.wait()
+            return granted ? .granted : .denied
         @unknown default: return .unknown
         }
     }

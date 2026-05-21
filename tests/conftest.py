@@ -93,14 +93,14 @@ growth_ms="${MOCK_GROWTH_INTERVAL_MS:-100}"
 
 case "${1:-}" in
     --version)
-        echo "meet-record-mac 0.5.0 (mock)"
+        echo "meet-record-mac 0.6.0 (mock)"
         exit 0
         ;;
     --help|-h)
         echo "mock meet-record-mac"
         exit 0
         ;;
-    probe-permissions)
+    probe-permissions|request-permissions)
         if [ "$behavior" = "deny_perms" ]; then
             echo "mic: granted"
             echo "system_audio: denied"
