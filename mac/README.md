@@ -87,6 +87,7 @@ meet-record-mac record \
 
 meet-record-mac devices [--json]
 meet-record-mac probe-permissions
+meet-record-mac request-permissions
 meet-record-mac --version
 meet-record-mac --help
 ```
@@ -171,24 +172,61 @@ The `uid` field is exactly what `--mic <uid>` accepts.
 # overall: ok
 ```
 
-Exit code is `0` when both are granted, `1` otherwise. The system_audio
-probe attempts to create + immediately destroy a Process Tap; this
-triggers the macOS prompt on first use but does not record any audio.
+Exit code is `0` when both are granted, `1` otherwise. Read-only: does
+not trigger any permission dialogs. The system_audio probe attempts to
+create + immediately destroy a Process Tap.
+
+### Request TCC permissions (M7)
+
+```sh
+./.build/release/meet-record-mac request-permissions
+# mic: granted
+# system_audio: granted
+# overall: ok
+```
+
+Same output format and exit codes as `probe-permissions`, but
+**triggers the macOS permission dialog** for Microphone when the TCC
+status is `notDetermined` (first use). Idempotent: if already granted
+or denied, returns immediately without showing any UI. The system_audio
+probe still triggers its dialog as a side effect of the tap creation.
+
+This is the subcommand that `meet check` and `meet record`'s
+prerequisite check call since meetscribe-record 0.3.0.
 
 ## Permissions
 
-On first run, macOS prompts for:
+macOS requires **two separate permissions** for dual-channel capture.
+Both must be granted for the terminal app hosting the recording:
 
-- **Microphone** — required (M4 actually taps the mic).
-- **System Audio Recording** — new TCC bucket introduced for Process Tap on
-  macOS 14.4. Grant it.
+| Permission | Channel | What happens if missing |
+|---|---|---|
+| **Microphone** | Left (your voice) | `AVAudioEngine.start()` fails or captures silence |
+| **System Audio Recording** | Right (remote participants) | Process Tap creation fails; right channel is silent |
 
-If you accidentally clicked Deny, re-grant via:
+On first run, macOS should prompt for both. If only Microphone is
+granted, your recording will capture your voice but remote participants
+will be silent — the transcript will show only you, with Whisper
+hallucinating single-word entries ("Hi.", "Thanks.", "Bye.") for others.
+
+Verify both are granted:
+
+```sh
+./.build/release/meet-record-mac request-permissions
+# or: meet check
+```
+
+If you accidentally clicked Deny, or a permission is missing, re-grant
+via:
 
 ```
 System Settings → Privacy & Security → Microphone
                                      → System Audio Recording
 ```
+
+Enable your terminal app in **both** lists. Microphone and System Audio
+Recording are independent TCC buckets — granting one does not grant the
+other.
 
 ## Per-channel level analysis (modern ffmpeg syntax)
 
