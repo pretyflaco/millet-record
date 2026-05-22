@@ -30,10 +30,14 @@ sudo apt install ffmpeg pulseaudio-utils
 ## CLI
 
 ```bash
-meet check          # verify prerequisites
-meet devices        # list audio sources
-meet record         # record dual-channel WAV; Ctrl+C to stop
-meet archive        # compress past WAV recordings to OGG/Opus
+meet check                   # verify prerequisites
+meet devices                 # list audio sources
+meet record                  # record dual-channel WAV; Ctrl+C to stop
+meet archive                 # compress past WAV recordings to OGG/Opus
+meet request-permissions     # macOS Sequoia 15+: trigger Microphone /
+                             # System Audio Recording TCC prompts
+                             # (Apple removed the manual '+' button in
+                             # System Settings, so apps must request)
 ```
 
 `meet record` writes to `~/meet-recordings/meeting-YYYYMMDD-HHMMSS/...wav`
@@ -71,6 +75,14 @@ via the standard macOS TCC dialogs; both are required for full dual-
 channel capture (mic on left, system on right). See
 [`mac/README.md`](mac/README.md) for the sidecar's CLI surface, level
 analysis recipes, and environment variables.
+
+On **macOS Sequoia 15+**, Apple removed the manual `+` button from
+System Settings → Privacy → Microphone, so users can no longer add
+permissions before running the app.  meetscribe-record 0.3.0 adds the
+`meet request-permissions` subcommand which explicitly calls
+`AVCaptureDevice.requestAccess(for: .audio)` to trigger the TCC
+dialog.  `meet check` will tell you which permission is missing and
+suggest running `request-permissions`.
 
 Set `MEET_RECORD_MAC=0` to force the legacy ffmpeg+PulseAudio path
 (diagnostic kill switch only — that path will fail on a stock macOS
