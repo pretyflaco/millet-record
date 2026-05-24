@@ -8,6 +8,8 @@ or PulseAudio + ffmpeg. Ships none of meetscribe's transcription,
 diarization, summarization, or PDF dependencies; install footprint is
 ~30 MB instead of ~3 GB.
 
+Full release history in [`CHANGELOG.md`](CHANGELOG.md).
+
 ## When to use which
 
 | Need | Install |
