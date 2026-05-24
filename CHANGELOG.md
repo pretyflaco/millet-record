@@ -1,8 +1,59 @@
 # Changelog
 
-Notable changes per release of `meetscribe-record`, the capture-only
-companion of [`meetscribe-offline`](https://github.com/pretyflaco/meetscribe).
+Notable changes per release of `millet-record` (formerly
+`meetscribe-record`), the capture-only companion of
+[`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## v0.4.0 — 2026-05-24 — rename to `millet-record`
+
+The package formerly known as `meetscribe-record` is now
+**`millet-record`**.  Capture-only sibling of `millet-pipeline`
+(formerly `meetscribe-offline`).  Named after the Ottoman *millet
+system*.  Part of the [vezir](https://github.com/pretyflaco/vezir)
+ecosystem.
+
+This release is **all rename, no feature change.**  Functional
+behavior is identical to 0.3.0.
+
+### Changed
+
+* **Distribution name**: `meetscribe-record` → `millet-record`.
+* **Import name**: `meet_record` → `millet_record`.  The old name is
+  preserved as a sys.modules alias + a meta-path finder so existing
+  `from meet_record.X import …` keeps working unchanged.  Removed in
+  `0.6.0`.
+* **CLI console script**: `meet` → `millet`.  The legacy `meet` is
+  retained as a separate entry point that emits a `DeprecationWarning`
+  + a stderr notice, then forwards to the same group.  Removed in
+  `0.6.0`.  Set `MILLET_SUPPRESS_DEPRECATION=1` to silence.
+* **Entry-point group consulted**: `millet.subcommands` (primary) and
+  `meet.subcommands` (legacy fallback for one deprecation cycle).
+* **`--version` output**: `meet 0.5.0 (meetscribe-offline 0.5.0;
+  meetscribe-record 0.1.0)` → `millet 0.9.0 (millet-pipeline 0.9.0;
+  millet-record 0.4.0)`.
+
+### What did NOT change
+
+* The bundled macOS Swift sidecar binary name (`meet-record-mac`).
+  Renaming it would require macOS code-signing bundle-path changes
+  that aren't worth doing as part of the rename.  Tracked as a
+  follow-up.
+* Internal class names, function signatures, capture behavior.
+* Linux ffmpeg + PulseAudio path, macOS sidecar path.
+
+### Migration
+
+```bash
+pip uninstall meetscribe-record
+pip install millet-record   # or `pip install millet-pipeline` to get both
+millet --version            # was: meet --version
+```
+
+Existing scripts that import `from meet_record.capture import …`
+continue to work for two minor versions before removal.
+
+---
 
 ## v0.3.0 — 2026-05-21
 

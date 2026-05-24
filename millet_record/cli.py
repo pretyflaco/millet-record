@@ -1,20 +1,25 @@
-"""CLI entry point for meetscribe-record.
+"""CLI entry point for millet-record (formerly meetscribe-record).
 
-Provides the `meet` console script with capture-only subcommands:
+Provides the `millet` console script with capture-only subcommands:
     record    — record dual-channel meeting audio
     devices   — list audio sources
     check     — verify prerequisites
     archive   — compress past WAV recordings to OGG/Opus
 
-When the optional `meetscribe-offline` package is installed, additional
+When the optional `millet-pipeline` package is installed, additional
 subcommands (transcribe, run, label, sync, gui, ...) are discovered
-through the `meet.subcommands` entry-point group and added dynamically.
+through the `millet.subcommands` entry-point group and added
+dynamically.  The legacy `meet.subcommands` group is also consulted
+for one deprecation cycle (millet-pipeline 0.9.x).
 
 This is the Click "plugin" pattern: every package wishing to extend the
-`meet` command registers Click command objects in `pyproject.toml`:
+`millet` command registers Click command objects in `pyproject.toml`:
 
-    [project.entry-points."meet.subcommands"]
-    transcribe = "meet.cli:transcribe_cmd"
+    [project.entry-points."millet.subcommands"]
+    transcribe = "millet.cli:transcribe_cmd"
+
+A second entry point `meet` is also published that prints a deprecation
+warning and forwards to the same group.  Removed in millet-record 0.6.0.
 """
 from __future__ import annotations
 
@@ -114,80 +119,121 @@ def _recording_loop(session) -> None:
 
 
 def _load_plugin_subcommands(group: click.Group) -> None:
-    """Discover and add subcommands registered under `meet.subcommands`.
+    """Discover and add subcommands registered under `millet.subcommands`.
 
-    Other packages (e.g. `meetscribe-offline`) extend the `meet` CLI by
-    declaring `meet.subcommands` entry points pointing at Click command
-    objects. Failure to load any one plugin is logged but does not break
-    the CLI.
+    Other packages (e.g. `millet-pipeline`) extend the `millet` CLI by
+    declaring `millet.subcommands` entry points pointing at Click
+    command objects.  Failure to load any one plugin is logged but does
+    not break the CLI.
+
+    For one deprecation cycle, the legacy `meet.subcommands` group is
+    also consulted — that's how millet-pipeline 0.9.x dual-publishes
+    so users on the old `meet` console-script alias still get the full
+    feature set.  Removed in millet-record 0.6.0.
     """
     try:
         from importlib.metadata import entry_points
     except ImportError:  # pragma: no cover — Python < 3.10 not supported
         return
 
-    try:
-        eps = entry_points(group="meet.subcommands")
-    except TypeError:
-        # Older importlib_metadata API
-        eps = entry_points().get("meet.subcommands", [])
-
-    for ep in eps:
+    eps_seen: set[str] = set()
+    for group_name in ("millet.subcommands", "meet.subcommands"):
         try:
-            cmd = ep.load()
-        except Exception as exc:
-            # Don't let a broken plugin take down the whole CLI; warn and skip.
-            click.echo(
-                f"warning: failed to load `meet` plugin {ep.name!r}: {exc}",
-                err=True,
-            )
-            continue
-        if isinstance(cmd, click.Command) and ep.name not in group.commands:
-            group.add_command(cmd, name=ep.name)
+            eps = entry_points(group=group_name)
+        except TypeError:
+            # Older importlib_metadata API
+            eps = entry_points().get(group_name, [])
+
+        for ep in eps:
+            if ep.name in eps_seen:
+                continue
+            eps_seen.add(ep.name)
+            try:
+                cmd = ep.load()
+            except Exception as exc:
+                # Don't let a broken plugin take down the whole CLI;
+                # warn and skip.
+                click.echo(
+                    f"warning: failed to load `millet` plugin "
+                    f"{ep.name!r}: {exc}",
+                    err=True,
+                )
+                continue
+            if isinstance(cmd, click.Command) and ep.name not in group.commands:
+                group.add_command(cmd, name=ep.name)
 
 
 from . import __version__
 
 
 def _combined_version() -> str:
-    """Format a `meet --version` string mentioning both packages when present.
+    """Format a `millet --version` string mentioning both packages when present.
 
     Example outputs:
-        meet 0.5.0 (meetscribe-record 0.1.0)
-        meet 0.1.0 (meetscribe-record 0.1.0; meetscribe-offline NOT installed)
+        millet 0.9.0 (millet-pipeline 0.9.0; millet-record 0.4.0)
+        millet 0.4.0 (millet-record 0.4.0; millet-pipeline NOT installed)
     """
     record_v = __version__
     try:
         from importlib.metadata import version, PackageNotFoundError
         try:
-            offline_v = version("meetscribe-offline")
+            pipeline_v = version("millet-pipeline")
         except PackageNotFoundError:
-            offline_v = None
+            try:
+                # transitional: pre-rename name might still be installed
+                pipeline_v = version("meetscribe-offline")
+            except PackageNotFoundError:
+                pipeline_v = None
     except Exception:
-        offline_v = None
+        pipeline_v = None
 
-    if offline_v:
+    if pipeline_v:
         return (
-            f"{offline_v} (meetscribe-offline {offline_v}; "
-            f"meetscribe-record {record_v})"
+            f"{pipeline_v} (millet-pipeline {pipeline_v}; "
+            f"millet-record {record_v})"
         )
     return (
-        f"{record_v} (meetscribe-record {record_v}; "
-        f"meetscribe-offline not installed — "
-        f"`pip install meetscribe-offline` for transcription/diarization)"
+        f"{record_v} (millet-record {record_v}; "
+        f"millet-pipeline not installed — "
+        f"`pip install millet-pipeline` for transcription/diarization)"
     )
 
 
 @click.group()
-@click.version_option(version=_combined_version(), prog_name="meet")
+@click.version_option(version=_combined_version(), prog_name="millet")
 def main():
     """Meeting audio recorder.
 
-    Capture-only subcommands ship in `meetscribe-record`. Install
-    `meetscribe-offline` to add transcription, diarization, labeling,
+    Capture-only subcommands ship in `millet-record`.  Install
+    `millet-pipeline` to add transcription, diarization, labeling,
     summarization, sync, and GUI subcommands.
     """
     pass
+
+
+def _deprecated_meet_main() -> None:
+    """Deprecation shim for the legacy ``meet`` console script.
+
+    Prints a one-time warning, then forwards to the ``millet`` group.
+    Removed in millet-record 0.6.0.
+    """
+    import warnings
+    import os
+    if os.environ.get("MILLET_SUPPRESS_DEPRECATION") != "1":
+        warnings.warn(
+            "The `meet` command is deprecated and will be removed in "
+            "millet-record 0.6.0.  Use `millet` instead.  Set "
+            "MILLET_SUPPRESS_DEPRECATION=1 to silence this warning.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # warnings module silently drops DeprecationWarning by default; also
+        # echo to stderr so the user actually sees it.
+        click.echo(
+            "warning: `meet` is deprecated; use `millet` instead.",
+            err=True,
+        )
+    main()
 
 
 # ─── record ──────────────────────────────────────────────────────────────────

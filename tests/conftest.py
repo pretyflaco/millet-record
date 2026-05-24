@@ -1,4 +1,4 @@
-"""Pytest fixtures for meet_record tests.
+"""Pytest fixtures for millet_record tests.
 
 This is the project's first conftest.py. It introduces:
 
@@ -26,7 +26,7 @@ permissions without us regenerating it per scenario.
 
 Constraints we explicitly model:
 
-* The watchdog at meet_record/capture.py:_watchdog_loop checks
+* The watchdog at millet_record/capture.py:_watchdog_loop checks
   ``proc.poll()`` (process liveness), ``stat(chunk).st_size`` growth
   (against ``_STALL_TIMEOUT = 15s``), and the per-chunk startup poll
   uses ``size > 1024`` as "ffmpeg has produced data" — see
@@ -280,7 +280,7 @@ def fake_recorder_factory(tmp_path: Path):
     selected per-spawn by the ``MOCK_BEHAVIOR`` env var, which the test
     sets on ``os.environ`` (since capture.py inherits the parent's env
     when launching subprocesses — confirmed by survey of the Popen call
-    site at meet_record/capture.py:_start_ffmpeg_chunk, which doesn't
+    site at millet_record/capture.py:_start_ffmpeg_chunk, which doesn't
     pass an explicit ``env=`` kwarg).
     """
     counter = {"n": 0}

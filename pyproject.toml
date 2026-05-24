@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "meetscribe-record"
+name = "millet-record"
 dynamic = ["version"]
-description = "Lightweight capture-only subset of meetscribe: record dual-channel meeting audio (mic + system) with no transcription/diarization/summarization deps."
+description = "Lightweight capture-only subset of millet (formerly meetscribe-record): record dual-channel meeting audio (mic + system) with no transcription/diarization/summarization deps.  Named after the Ottoman millet system.  Part of the vezir ecosystem."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
@@ -40,36 +40,44 @@ dependencies = [
 ]
 
 [project.scripts]
-meet = "meet_record.cli:main"
+millet = "millet_record.cli:main"
+# Deprecation-alias console script.  Prints a one-time warning, then
+# forwards to the `millet` group.  Removed in millet-record 0.6.0.
+meet = "millet_record.cli:_deprecated_meet_main"
 
 [project.urls]
-Homepage = "https://github.com/pretyflaco/meetscribe-record"
-Repository = "https://github.com/pretyflaco/meetscribe-record"
-Issues = "https://github.com/pretyflaco/meetscribe-record/issues"
+Homepage = "https://github.com/pretyflaco/millet-record"
+Repository = "https://github.com/pretyflaco/millet-record"
+Issues = "https://github.com/pretyflaco/millet-record/issues"
 
 [tool.setuptools.dynamic]
-# Single source of truth lives at meet_record/__init__.py:__version__.
+# Single source of truth lives at millet_record/__init__.py:__version__.
 # Without this, bumping a release would require editing both files in
 # lockstep — a maintenance hazard.
-version = {attr = "meet_record.__version__"}
+version = {attr = "millet_record.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["meet_record*"]
+include = ["millet_record*"]
 
 [tool.setuptools.package-data]
 # Ship the macOS arm64 binary inside the wheel at
-# meet_record/_bin/meet-record-mac. The directory is .gitignore'd
+# millet_record/_bin/meet-record-mac. The directory is .gitignore'd
 # (only the .gitignore itself is committed) so the binary lands in
 # place at wheel-build time, copied from the mac.yml CI artifact by
 # release.yml.
 #
 # The two-glob shape (`_bin/*` + `_bin/.*`) is necessary because
 # setuptools.package-data uses fnmatch which excludes dotfiles from
-# `*`. We need the dotfile so the directory is non-empty in the
+# `*`.  We need the dotfile so the directory is non-empty in the
 # Linux wheel (where there's no binary to ship) and so the directory
 # is created by `pip install` even when the tree is otherwise empty.
-meet_record = ["_bin/*", "_bin/.*"]
+#
+# Note: the binary file itself is still named `meet-record-mac` —
+# renaming it would require macOS code-signing bundle-path changes
+# that aren't worth doing as part of the rename.  Tracked as a
+# follow-up.
+millet_record = ["_bin/*", "_bin/.*"]
 
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "pytest-timeout", "build"]
