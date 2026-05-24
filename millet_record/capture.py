@@ -91,7 +91,7 @@ def _resolve_darwin_recorder() -> Path:
 
     Resolution order:
       1. ``MEET_RECORD_MAC_PATH`` env var (test/manual override).
-      2. ``meet_record/_bin/meet-record-mac`` next to this module
+      2. ``millet_record/_bin/meet-record-mac`` next to this module
          (the path the macOS arm64 wheel installs to).
       3. ``meet-record-mac`` on ``PATH`` (development convenience for
          running against a `swift build` artefact in a checkout).
@@ -120,7 +120,7 @@ def _resolve_darwin_recorder() -> Path:
 
     raise FileNotFoundError(
         "meet-record-mac not found. Install the macOS arm64 wheel of "
-        "meetscribe-record (which bundles it at meet_record/_bin/), set "
+        "meetscribe-record (which bundles it at millet_record/_bin/), set "
         f"{_DARWIN_RECORDER_PATH_ENV} to a built binary, or add it to PATH."
     )
 

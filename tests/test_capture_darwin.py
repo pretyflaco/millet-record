@@ -1,4 +1,4 @@
-"""Tests for the macOS sidecar branch of meet_record.capture.
+"""Tests for the macOS sidecar branch of millet_record.capture.
 
 Runs on Linux CI by injecting ``sys.platform = "darwin"`` and pointing
 ``MEET_RECORD_MAC_PATH`` at a bash mock that mimics the
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-import meet_record.capture as cap
+import millet_record.capture as cap
 
 
 # ─── _resolve_darwin_recorder ────────────────────────────────────────────────
@@ -55,10 +55,10 @@ def test_resolve_rejects_env_override_pointing_at_nonexistent_file(monkeypatch, 
 
 
 def test_resolve_finds_bundled_binary_when_env_unset(monkeypatch, tmp_path):
-    """Falls back to meet_record/_bin/meet-record-mac.
+    """Falls back to millet_record/_bin/meet-record-mac.
 
-    We can't write into the real meet_record/_bin during a test, so we
-    monkeypatch ``meet_record.capture.Path(__file__)`` semantics by
+    We can't write into the real millet_record/_bin during a test, so we
+    monkeypatch ``millet_record.capture.Path(__file__)`` semantics by
     creating a fake _bin directory and pointing the resolver at it via
     a temporary working module path injection.
     """
