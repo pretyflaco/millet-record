@@ -5,6 +5,34 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.4.1 — 2026-05-24 — fix `--version` mislabel when only legacy pipeline installed
+
+### Fixed
+
+* **`--version` output mislabeled legacy `meetscribe-offline` as
+  `millet-pipeline`.**  When the new `millet-pipeline 0.9.0` was not
+  installed but the pre-rename `meetscribe-offline` was, the
+  fallback found the legacy version number but the output string
+  still claimed `millet-pipeline X.Y.Z`.  A user on the 2026-05-24
+  laptop smoke read `millet, version 0.7.1 (millet-pipeline 0.7.1;
+  millet-record 0.4.0)` and assumed they had the new package
+  installed when they only had the old one.
+
+  Now the output explicitly names the legacy package and prompts
+  for the upgrade:
+
+      millet, version 0.7.1 (meetscribe-offline 0.7.1 [legacy —
+        `pip install millet-pipeline` to upgrade]; millet-record 0.4.1)
+
+  Also reworded the "not installed" branch from "millet-pipeline not
+  installed" to "pipeline not installed" so it doesn't visually
+  conflict with the line above when both branches appear in
+  documentation side-by-side.
+
+No other changes.  Pure cosmetic.
+
+---
+
 ## v0.4.0 — 2026-05-24 — rename to `millet-record`
 
 The package formerly known as `meetscribe-record` is now

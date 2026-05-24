@@ -169,33 +169,56 @@ from . import __version__
 def _combined_version() -> str:
     """Format a `millet --version` string mentioning both packages when present.
 
+    Resolution preference: ``millet-pipeline`` (current name) > legacy
+    ``meetscribe-offline`` (pre-rename name).  When the legacy package
+    is found, label the version string accordingly so users aren't
+    misled into thinking they have the new package installed when they
+    actually have the old one — the mislabel surfaced during the
+    2026-05-24 laptop smoke when a user with only legacy
+    ``meetscribe-offline 0.7.1`` installed saw "millet-pipeline 0.7.1"
+    in their --version output and assumed they had the new package.
+
     Example outputs:
-        millet 0.9.0 (millet-pipeline 0.9.0; millet-record 0.4.0)
-        millet 0.4.0 (millet-record 0.4.0; millet-pipeline NOT installed)
+        millet 0.9.0 (millet-pipeline 0.9.0; millet-record 0.4.1)
+        millet 0.7.1 (meetscribe-offline 0.7.1 [legacy — `pip install \
+millet-pipeline` to upgrade]; millet-record 0.4.1)
+        millet 0.4.1 (millet-record 0.4.1; pipeline not installed — \
+`pip install millet-pipeline` for transcription/diarization)
     """
     record_v = __version__
+    pipeline_v: str | None = None
+    pipeline_label = "millet-pipeline"  # source identifier
+    legacy_fallback = False
     try:
         from importlib.metadata import version, PackageNotFoundError
         try:
             pipeline_v = version("millet-pipeline")
         except PackageNotFoundError:
             try:
-                # transitional: pre-rename name might still be installed
+                # Transitional: pre-rename name might still be installed.
                 pipeline_v = version("meetscribe-offline")
+                pipeline_label = "meetscribe-offline"
+                legacy_fallback = True
             except PackageNotFoundError:
                 pipeline_v = None
     except Exception:
         pipeline_v = None
 
-    if pipeline_v:
+    if pipeline_v is None:
         return (
-            f"{pipeline_v} (millet-pipeline {pipeline_v}; "
+            f"{record_v} (millet-record {record_v}; "
+            f"pipeline not installed — "
+            f"`pip install millet-pipeline` for transcription/diarization)"
+        )
+    if legacy_fallback:
+        return (
+            f"{pipeline_v} ({pipeline_label} {pipeline_v} "
+            f"[legacy — `pip install millet-pipeline` to upgrade]; "
             f"millet-record {record_v})"
         )
     return (
-        f"{record_v} (millet-record {record_v}; "
-        f"millet-pipeline not installed — "
-        f"`pip install millet-pipeline` for transcription/diarization)"
+        f"{pipeline_v} ({pipeline_label} {pipeline_v}; "
+        f"millet-record {record_v})"
     )
 
 
