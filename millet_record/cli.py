@@ -190,7 +190,7 @@ millet-pipeline` to upgrade]; millet-record 0.4.1)
     pipeline_label = "millet-pipeline"  # source identifier
     legacy_fallback = False
     try:
-        from importlib.metadata import version, PackageNotFoundError
+        from importlib.metadata import PackageNotFoundError, version
         try:
             pipeline_v = version("millet-pipeline")
         except PackageNotFoundError:
@@ -240,8 +240,8 @@ def _deprecated_meet_main() -> None:
     Prints a one-time warning, then forwards to the ``millet`` group.
     Removed in millet-record 0.6.0.
     """
-    import warnings
     import os
+    import warnings
     if os.environ.get("MILLET_SUPPRESS_DEPRECATION") != "1":
         warnings.warn(
             "The `meet` command is deprecated and will be removed in "
@@ -285,7 +285,7 @@ def _deprecated_meet_main() -> None:
 )
 def record(output_dir, filename, mic, monitor, virtual_sink):
     """Record meeting audio. Press Ctrl+C to stop."""
-    from .capture import create_session, check_prerequisites
+    from .capture import check_prerequisites, create_session
 
     issues = check_prerequisites()
     if issues:
@@ -340,7 +340,7 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
 @main.command()
 def devices():
     """List available audio devices."""
-    from .capture import list_sources, get_default_sink, get_default_source
+    from .capture import get_default_sink, get_default_source, list_sources
 
     try:
         default_source = get_default_source()
@@ -378,8 +378,9 @@ def check():
     Verifies ffmpeg + PulseAudio/PipeWire. If meetscribe-offline is also
     installed, additionally probes whisperx, CUDA, and HF_TOKEN.
     """
-    from .capture import check_prerequisites
     import os
+
+    from .capture import check_prerequisites
 
     click.echo("Checking prerequisites...")
     click.echo()

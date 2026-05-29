@@ -82,6 +82,24 @@ millet_record = ["_bin/*", "_bin/.*"]
 [project.optional-dependencies]
 dev = ["ruff", "pytest", "pytest-timeout", "build"]
 
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favor readability over bugbear/ruff opinions.
+"tests/*" = ["B", "RUF", "E501"]
+# CLI defers the version import until after the click group is defined.
+"millet_record/cli.py" = ["E402"]
+# Native-script language names (Turkish dotless ı, Arabic) trip the
+# "ambiguous Unicode" check; they are intentional and correct.
+"millet_record/languages.py" = ["RUF001"]
+# One long ffmpeg/pactl argv comment line.
+"millet_record/capture.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # pytest-timeout: kills any test that runs longer than the given budget,

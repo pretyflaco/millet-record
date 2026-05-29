@@ -17,7 +17,7 @@ Version is the single source of truth here; pyproject.toml's
 [project] section pulls it dynamically via setuptools.dynamic.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # ── Backward-compat: meet_record alias ──────────────────────────────────────
 # Existing code (e.g. older meetscribe-offline 0.8.3 compatibility shims,
@@ -29,10 +29,10 @@ __version__ = "0.4.1"
 #
 # Removed in millet-record 0.6.0 (matches the `meet` console-script
 # deprecation timeline).
-import sys as _sys
 import importlib as _importlib
 import importlib.abc as _abc
 import importlib.machinery as _machinery
+import sys as _sys
 
 
 class _MeetRecordAliasFinder(_abc.MetaPathFinder):
@@ -67,7 +67,7 @@ class _MeetRecordAliasLoader(_abc.Loader):
         new_name = "millet_record." + spec.name[len("meet_record."):]
         return _sys.modules.get(new_name) or _importlib.import_module(new_name)
 
-    def exec_module(self, module):  # noqa: D401 - aliased; nothing to exec
+    def exec_module(self, module):
         return None
 
 

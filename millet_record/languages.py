@@ -8,7 +8,6 @@ and cli.py.
 
 from __future__ import annotations
 
-
 # ─── Language names ─────────────────────────────────────────────────────────
 
 LANG_NAMES: dict[str, str] = {

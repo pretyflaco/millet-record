@@ -4,13 +4,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "meet_record/**"
+      - "millet_record/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/python-ci.yml"
   pull_request:
     paths:
-      - "meet_record/**"
+      - "millet_record/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/python-ci.yml"
@@ -36,7 +36,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install ffmpeg
-        # ffmpeg is a runtime prereq of meetscribe-record on Linux
+        # ffmpeg is a runtime prereq of millet-record on Linux
         # (used by capture.py for chunk stitching at session stop and
         # by audio.py for compression). The watchdog-restart e2e test
         # exercises the multi-chunk concat path, so ffmpeg must be on
@@ -50,6 +50,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check millet_record/ tests/
 
       - name: Run pytest
         run: pytest -v

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -32,7 +31,6 @@ from pathlib import Path
 import pytest
 
 import millet_record.capture as cap
-
 
 # ─── _resolve_darwin_recorder ────────────────────────────────────────────────
 

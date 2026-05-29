@@ -44,7 +44,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 _WATCHDOG_INTERVAL = 3.0  # seconds between health checks
@@ -820,7 +819,7 @@ class RecordingSession:
                 "load-module",
                 "module-null-sink",
                 f"sink_name={sink_name}",
-                f"sink_properties=device.description=Meet-Capture",
+                "sink_properties=device.description=Meet-Capture",
                 "rate=16000",
                 "channels=1",
             ],

@@ -5,6 +5,28 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.4.2 — 2026-05-29 — CI fix, ruff, Linux capture tests
+
+Code-health release.  No runtime behavior change.
+
+### Fixed
+
+* **CI never triggered on code changes**: `python-ci.yml` `paths:`
+  filters referenced the pre-rename `meet_record/**`; the package is
+  `millet_record/**`.  Pushes/PRs touching the package were silently
+  skipping CI.  Filters corrected; a `ruff check` step added.
+
+### Added
+
+* **`[tool.ruff]` config** (mirrors the vezir ruleset
+  `E,F,W,I,B,UP,RUF`); existing lint cleaned up.
+* **`tests/test_capture_linux.py`** (10 tests) covering the Linux
+  PulseAudio/PipeWire + ffmpeg path that real Linux users hit:
+  `list_sources` parsing, `get_default_sink/source`,
+  `get_monitor_source`, and the Linux branch of `check_prerequisites`
+  (missing ffmpeg / pactl).  Previously only the macOS sidecar path was
+  tested.
+
 ## v0.4.1 — 2026-05-24 — fix `--version` mislabel when only legacy pipeline installed
 
 ### Fixed

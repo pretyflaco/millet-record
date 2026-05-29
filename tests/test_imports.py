@@ -43,13 +43,13 @@ def test_meetscribe_offline_shims_still_work_when_installed():
     """If meetscribe-offline is also installed, its compat shims should
     re-export from millet_record correctly. Skipped if not installed."""
     try:
-        from meet import capture as meet_capture
-        from meet import utils as meet_utils
         from meet import audio as meet_audio
+        from meet import capture as meet_capture
         from meet import languages as meet_languages
+        from meet import utils as meet_utils
     except ImportError:
         return  # meetscribe-offline not installed; not a failure
-    from millet_record import capture, utils, audio, languages
+    from millet_record import audio, capture, languages, utils
     assert meet_capture.DRAIN_SECONDS == capture.DRAIN_SECONDS
     assert meet_utils.fmt_elapsed is utils.fmt_elapsed
     assert meet_audio.read_stereo_channels is audio.read_stereo_channels
