@@ -182,14 +182,19 @@ jobs:
 
       - name: Verify install
         run: |
-          # `meet --version` proves the entry point + version dynamic
+          # `millet --version` proves the entry point + version dynamic
           # plumbing works. Direct sidecar invocation proves the
           # binary made it into _bin/ and is exec-permission-correct.
-          meet --version || (meet --help 2>&1 | head -1) || true
-          python -c "import meet_record; print('meet_record version:', meet_record.__version__)"
-          python -c "from meet_record.capture import _resolve_darwin_recorder; print('recorder:', _resolve_darwin_recorder())"
+          # Use the canonical `millet_record` package, not the legacy
+          # `meet_record` alias: the alias is installed by a MetaPathFinder
+          # inside millet_record/__init__.py, so a bare `import meet_record`
+          # in a fresh interpreter (without importing millet_record first)
+          # fails — which is what broke the 0.4.3 release verify.
+          millet --version || (millet --help 2>&1 | head -1) || true
+          python -c "import millet_record; print('millet_record version:', millet_record.__version__)"
+          python -c "from millet_record.capture import _resolve_darwin_recorder; print('recorder:', _resolve_darwin_recorder())"
 
-          BIN=$(python -c "from meet_record.capture import _resolve_darwin_recorder; print(_resolve_darwin_recorder())")
+          BIN=$(python -c "from millet_record.capture import _resolve_darwin_recorder; print(_resolve_darwin_recorder())")
           "$BIN" --version
           "$BIN" devices --json | python -m json.tool | head -10
 
@@ -197,7 +202,7 @@ jobs:
         # End-to-end: the binary in the wheel actually records a WAV.
         # No TCC permissions needed (--mic none --system none).
         run: |
-          BIN=$(python -c "from meet_record.capture import _resolve_darwin_recorder; print(_resolve_darwin_recorder())")
+          BIN=$(python -c "from millet_record.capture import _resolve_darwin_recorder; print(_resolve_darwin_recorder())")
           "$BIN" record \
               --mic none --system none \
               --max-seconds 1.0 \
