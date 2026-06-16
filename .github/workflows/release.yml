@@ -4,10 +4,10 @@ name: release
 #
 # Builds two wheels on every manual run or `record-v*` tag push:
 #   * millet_record-<version>-py3-none-any.whl   (Linux/universal,
-#     ships an empty meet_record/_bin/ directory; capture.py shells
+#     ships an empty millet_record/_bin/ directory; capture.py shells
 #     out to system ffmpeg+pactl on Linux)
 #   * millet_record-<version>-py3-none-macosx_14_0_arm64.whl
-#     (macOS arm64, ships meet_record/_bin/meet-record-mac built by
+#     (macOS arm64, ships millet_record/_bin/meet-record-mac built by
 #     the build-mac-binary job; capture.py uses this binary by default)
 #
 # On a `record-v*` TAG push (only), the `publish` job uploads BOTH
@@ -91,12 +91,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: meet-record-mac-binary
-          path: meet_record/_bin
+          # Must be the CANONICAL package dir millet_record/_bin (setuptools
+          # package-data ships millet_record/_bin/*). The legacy meet_record/_bin
+          # path is NOT packaged, so the binary silently never made it into the
+          # wheel (0.4.0–0.4.2 + the first 0.4.3 attempt shipped an empty _bin/).
+          path: millet_record/_bin
 
       - name: Make binary executable
         run: |
-          chmod +x meet_record/_bin/meet-record-mac
-          ls -la meet_record/_bin/
+          chmod +x millet_record/_bin/meet-record-mac
+          ls -la millet_record/_bin/
 
       - name: Build base wheel (py3-none-any)
         # `python -m build --wheel` produces a single wheel tagged
