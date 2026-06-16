@@ -1,20 +1,28 @@
 name: release
 
-# Release pipeline for meetscribe-record.
+# Release pipeline for millet-record (formerly meetscribe-record).
 #
-# Phase 1 (current, M6c.i): produce two artefacts on every manual run
-# or tag push, available as workflow-artifact downloads:
-#   * meetscribe_record-<version>-py3-none-any.whl   (Linux/universal,
+# Builds two wheels on every manual run or `record-v*` tag push:
+#   * millet_record-<version>-py3-none-any.whl   (Linux/universal,
 #     ships an empty meet_record/_bin/ directory; capture.py shells
 #     out to system ffmpeg+pactl on Linux)
-#   * meetscribe_record-<version>-py3-none-macosx_14_0_arm64.whl
+#   * millet_record-<version>-py3-none-macosx_14_0_arm64.whl
 #     (macOS arm64, ships meet_record/_bin/meet-record-mac built by
-#     mac.yml; capture.py uses this binary when MEET_RECORD_MAC=1)
+#     the build-mac-binary job; capture.py uses this binary by default)
 #
-# Phase 2 (M9, future): notarize the macOS binary inside the build job
-# (requires Apple Developer ID), publish both wheels to PyPI via
-# trusted-publisher token. Out of scope for this workflow today; the
-# wheels are downloadable from the run for manual `pip install`.
+# On a `record-v*` TAG push (only), the `publish` job uploads BOTH
+# wheels + the sdist to PyPI via PyPI Trusted Publishing (OIDC — no
+# stored token; the workflow is registered as a trusted publisher on
+# the PyPI project). Manual `workflow_dispatch` runs build + verify but
+# do NOT publish, so they stay safe for testing.
+#
+# Publishing the macOS wheel here fixes the gap where 0.4.0–0.4.2 only
+# ever shipped the binary-less py3-none-any wheel to PyPI (the macOS
+# wheel existed solely as a workflow artifact), so `pip install
+# millet-record` on Apple Silicon got no bundled meet-record-mac.
+#
+# Phase 2 (future): notarize the macOS binary (requires Apple Developer
+# ID); the binary currently ships unsigned/ad-hoc.
 
 on:
   push:
@@ -198,3 +206,47 @@ jobs:
           test -s /tmp/wheel-smoke.wav
           ls -la /tmp/wheel-smoke.wav
           ffprobe -v error -show_entries stream=sample_rate,channels,sample_fmt -of default=nw=1 /tmp/wheel-smoke.wav
+
+  # ─── Job 4: publish both wheels + sdist to PyPI (tag pushes only) ─────────
+  publish:
+    # Only on a `record-v*` tag push, and only after the macOS wheel has
+    # been built AND smoke-verified. Manual workflow_dispatch runs skip
+    # this job entirely (build + verify still run, for safe testing).
+    if: startsWith(github.ref, 'refs/tags/record-v')
+    needs: [build-wheels, verify-mac-wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      # Required for PyPI Trusted Publishing (OIDC). No API token stored.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist
+
+      - name: Build sdist
+        # The `wheels` artifact carries only the two .whl files; build the
+        # source distribution here so PyPI also gets an sdist.
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist --outdir dist
+          ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Trusted Publishing resolves credentials via OIDC; no
+          # username/password/token inputs. Fails loudly if the project's
+          # trusted-publisher config on PyPI doesn't match this workflow.
+          packages-dir: dist
+          print-hash: true

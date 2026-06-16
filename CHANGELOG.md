@@ -5,6 +5,29 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.4.3 — 2026-06-16 — publish the macOS arm64 wheel to PyPI
+
+Packaging fix.  No code or runtime-behavior change.
+
+### Fixed
+
+* **macOS arm64 wheel is now published to PyPI.**  Releases 0.4.0–0.4.2
+  shipped only the binary-less `py3-none-any` wheel to PyPI; the
+  `…-macosx_14_0_arm64` wheel that bundles the `meet-record-mac` Swift
+  sidecar (built on a GitHub `macos-14` runner) existed *only* as a
+  workflow artifact and was never uploaded.  Result: `pip install
+  millet-record` on Apple Silicon got an empty `millet_record/_bin/`, and
+  `vezir scribe` failed with `meet-record-mac not found`.
+* **`release.yml` now publishes on a `record-v*` tag push** via PyPI
+  Trusted Publishing (OIDC — no stored token): both wheels + the sdist
+  are uploaded after the macOS wheel passes its install/record smoke
+  test.  Manual `workflow_dispatch` runs still build + verify only.
+
+### Upgrade
+
+* macOS (Apple Silicon): `pip install --upgrade millet-record` (or
+  `vezir[tui]`) now resolves the wheel with the bundled sidecar.
+
 ## v0.4.2 — 2026-05-29 — CI fix, ruff, Linux capture tests
 
 Code-health release.  No runtime behavior change.
