@@ -5,6 +5,20 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.4.4 — 2026-06-16 — cap requires-python at <3.14 (coincurve build fail)
+
+Packaging guard.  No code change.
+
+### Fixed
+
+* **`requires-python` now `>=3.10,<3.14`.**  On a fresh Mac, `brew install
+  python3` gives Python 3.14, and `coincurve` (pulled transitively in the
+  vezir thin-client via `vezir[nostr]`) has no cp314 wheel — so the install
+  fell back to a source build that fails (`Expected exactly one LICENSE file
+  in cffi distribution`).  Capping the floor/ceiling makes pip/pipx select
+  3.13 (which has a prebuilt wheel) or refuse with a clear message, instead
+  of a cryptic build crash.  Relax once coincurve ships cp314 wheels.
+
 ## v0.4.3 — 2026-06-16 — publish the macOS arm64 wheel to PyPI
 
 Packaging fix.  No code or runtime-behavior change.

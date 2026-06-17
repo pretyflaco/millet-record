@@ -7,7 +7,11 @@ name = "millet-record"
 dynamic = ["version"]
 description = "Lightweight capture-only subset of millet (formerly meetscribe-record): record dual-channel meeting audio (mic + system) with no transcription/diarization/summarization deps.  Named after the Ottoman millet system.  Part of the vezir ecosystem."
 readme = "README.md"
-requires-python = ">=3.10"
+# Upper bound: coincurve (pulled transitively via vezir[nostr]) has no
+# cp314 wheel yet, so a 3.14 install falls back to a source build that
+# fails. Cap at <3.14 so pip/pipx select 3.13 (or refuse with a clear
+# message) instead. Relax once coincurve ships cp314 wheels.
+requires-python = ">=3.10,<3.14"
 license = {text = "GPL-3.0-or-later"}
 authors = [{name = "pretyflaco"}]
 keywords = [
