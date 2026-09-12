@@ -1,5 +1,9 @@
 # millet-record
 
+[![CI](https://github.com/pretyflaco/millet-record/actions/workflows/python-ci.yml/badge.svg)](https://github.com/pretyflaco/millet-record/actions/workflows/python-ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/millet-record.svg)](https://pypi.org/project/millet-record/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/millet-record?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/millet-record)
+
 Lightweight capture-only subset of [millet](https://github.com/pretyflaco/millet)
 (formerly meetscribe-record).
 
@@ -39,18 +43,35 @@ millet check                   # verify prerequisites
 millet devices                 # list audio sources
 millet record                  # record dual-channel WAV; Ctrl+C to stop
 millet archive                 # compress past WAV recordings to OGG/Opus
-millet request-permissions     # macOS Sequoia 15+: trigger Microphone /
-                               # System Audio Recording TCC prompts
-                               # (Apple removed the manual '+' button in
-                               # System Settings, so apps must request)
 ```
 
-`millet record` writes to `~/millet-recordings/meeting-YYYYMMDD-HHMMSS/...wav`
+`millet record` writes to `~/meet-recordings/meeting-YYYYMMDD-HHMMSS/...wav`
 unless `-o` is passed. See `millet record --help` for options.
 
 When `millet-pipeline` is also installed, additional subcommands
 (`transcribe`, `run`, `label`, `sync`, `gui`, ...) become available
 under the same `millet` command via Click entry-points.
+
+### System-audio silence warning (0.5.1)
+
+The system-audio monitor is resolved once, at session start.  If the
+meeting app's output is later routed elsewhere — switching apps mid-call,
+plugging in headphones — that monitor goes silent while your mic keeps the
+stereo file growing.  The remote side is lost with no process failure and
+nothing in the output to suggest it.
+
+`millet record` now samples per-channel RMS while recording and warns
+inline the first time the system channel goes quiet:
+
+```
+⚠ System audio silent — remote participants may not be recorded
+✔ System audio restored
+```
+
+`session.json` records `system_ever_active` and `system_silent_detected`,
+so a downstream tool can flag a recording that captured only one side.  An
+unreadable sample counts as *unknown*, never as silent, so a transient
+ffmpeg hiccup cannot produce a false alarm.
 
 ### Legacy `meet` command
 
@@ -66,8 +87,8 @@ transition.
 
 - `millet_record.capture` — ffmpeg-backed dual-channel capture
   (RecordingSession, watchdog, drain buffer)
-- `millet_record.audio` — stereo channel reading + ffmpeg-based audio
-  compression
+- `millet_record.audio` — stereo channel reading, per-channel RMS
+  sampling (system-silence detection), ffmpeg-based audio compression
 - `millet_record.utils` — formatting helpers (HH:MM:SS, file sizes)
 - `millet_record.languages` — language constants used by capture flow
 - `millet_record.cli` — `millet` console-script entry point
@@ -101,10 +122,12 @@ analysis recipes, and environment variables.
 
 On **macOS Sequoia 15+**, Apple removed the manual `+` button from
 System Settings → Privacy → Microphone, so users can no longer add
-permissions before running the app.  The `millet request-permissions`
-subcommand explicitly calls `AVCaptureDevice.requestAccess(for: .audio)`
-to trigger the TCC dialog.  `millet check` will tell you which
-permission is missing and suggest running `request-permissions`.
+permissions before running the app.  Instead, run `millet check`: it
+invokes the sidecar's `request-permissions` routine, which calls
+`AVCaptureDevice.requestAccess(for: .audio)` to trigger the TCC dialog,
+and reports which permission is still missing.  (`request-permissions`
+is a subcommand of the bundled `meet-record-mac` binary, not of the
+`millet` CLI — `millet check` is the user-facing entry point.)
 
 Set `MEET_RECORD_MAC=0` to force the legacy ffmpeg+PulseAudio path
 (diagnostic kill switch only — that path will fail on a stock macOS
