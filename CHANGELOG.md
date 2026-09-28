@@ -5,6 +5,63 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.6.0 — 2026-09-28 — crash resilience: recording lock, recorder marker, interrupted-session recovery
+
+Incident 2026-09-28: a scribe's TUI died mid-recording.  The recorder —
+deliberately `start_new_session=True`-detached so the meeting survives a
+UI crash — kept writing as an orphan for 12 more minutes, capturing two
+*subsequent* meetings into the dead session's file.  Meanwhile the
+recording appeared lost: nothing on disk said "interrupted,
+recoverable", and nothing stopped a second recording from starting while
+the orphan held the mic.  The audio itself was fully intact (chunk WAVs
++ header repair already worked); what was missing was the bookkeeping.
+
+This release adds the bookkeeping.  Test suite grows 81 → 104 (23 new).
+
+### Added
+
+* **Recording lock** (`recording.lock` in the output root).
+  `create_session` + `start()` now take a PID-checked lock; a second
+  `start()` in the same root raises **`RecordingInProgressError`**
+  (carrying the holder's pid/start time/session dir).  Locks left by
+  dead processes are reclaimed automatically, with a
+  (pid, /proc start-ticks) pair guarding against pid reuse on Linux.
+  Set `MEET_RECORD_LOCK=0` to bypass (diagnostic kill switch, matching
+  the `MEET_RECORD_MAC=0` convention).  The `record` CLI exits cleanly
+  with the holder info instead of a traceback.  Direct
+  `RecordingSession(...)` construction (no `create_session`) skips
+  locking, for embedders that manage their own lifecycle.
+* **`<stem>.recorder.json` marker**, written on every recorder spawn
+  (start/restart/resume), removed on clean stop/pause: recorder pid +
+  owner pid + start ticks + backend + chunk name.  Because the recorder
+  outlives its parent by design, this marker is what lets a later
+  process distinguish *recording right now* from *orphaned recorder
+  still writing*.
+* **`<stem>.session.json` is written at recording start** with
+  `status: "recording"` + `owner_pid`, rewritten at stop with
+  `status: "stopped"` (and on failed start with `status: "failed"`).
+  An interrupted session dir is now self-describing.
+* **`find_interrupted_sessions(root) -> list[InterruptedSession]`** —
+  scans a recordings dir for sessions that never finished (chunk files,
+  no final WAV), newest first, and classifies each via the marker:
+  in-progress (leave it alone), `orphaned` (owner dead, recorder alive —
+  SIGINT the recorder, then recover), or plain interrupted.
+* **`recover_session(session_dir) -> Path`** — repairs chunk WAV headers
+  (a SIGKILLed recorder never patched its RIFF/data sizes), stitches
+  chunks in order (ffmpeg concat, largest-chunk fallback), cleans up
+  chunks, and marks the metadata `status: "recovered"`.  Refuses
+  (RuntimeError) while a recorder is still writing into the dir.
+
+### Removed (announced in 0.4.0, two-minor-version window)
+
+* **`meet` console script** and its deprecation shim.  Use `millet`.
+* **`meet_record` import alias** (MetaPathFinder).  Use `millet_record`.
+  Verified safe across the ecosystem: vezir and millet-pipeline import
+  the canonical names; only docstrings mentioned the legacy one.
+* **`meet.subcommands` entry-point group scan** in the CLI plugin
+  loader (millet-pipeline dual-publishes `millet.subcommands` since
+  0.9.x, so nothing is lost).
+
 ## v0.5.1 — 2026-08-26 — system-channel silence detection
 
 Adds live detection of a silent system (remote) channel during recording.

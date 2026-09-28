@@ -45,9 +45,8 @@ dependencies = [
 
 [project.scripts]
 millet = "millet_record.cli:main"
-# Deprecation-alias console script.  Prints a one-time warning, then
-# forwards to the `millet` group.  Removed in millet-record 0.6.0.
-meet = "millet_record.cli:_deprecated_meet_main"
+# The `meet` deprecation-alias console script was removed in 0.6.0 after
+# the announced two-minor-version window (see CHANGELOG).
 
 [project.urls]
 Homepage = "https://github.com/pretyflaco/millet-record"

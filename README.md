@@ -73,13 +73,31 @@ so a downstream tool can flag a recording that captured only one side.  An
 unreadable sample counts as *unknown*, never as silent, so a transient
 ffmpeg hiccup cannot produce a false alarm.
 
-### Legacy `meet` command
+### Crash resilience (0.6.0)
 
-The pre-rename `meet` console script keeps working for two minor
-versions (until `millet-record 0.6.0`).  It prints a deprecation
-warning on each invocation and forwards to the `millet` group.  Set
-`MILLET_SUPPRESS_DEPRECATION=1` to silence the warning during
-transition.
+Recorders run `start_new_session=True`-detached **on purpose**: if the
+controlling app (TUI, CLI) crashes, the recording survives — the meeting
+is still happening.  0.6.0 adds the bookkeeping to make that survivable
+in practice:
+
+* `recording.lock` in the recordings root blocks a second concurrent
+  recording (`RecordingInProgressError`, PID-checked, stale locks
+  auto-reclaimed; `MEET_RECORD_LOCK=0` disables).
+* `<stem>.recorder.json` identifies the live recorder process
+  (pid + owner pid + start ticks); removed on clean stop/pause.
+* `<stem>.session.json` is now written at recording *start*
+  (`status: "recording"`) and rewritten at stop (`status: "stopped"`).
+* `millet_record.capture.find_interrupted_sessions(root)` scans a
+  recordings dir for sessions that never finished, distinguishing
+  *in progress* / *orphaned recorder* / *interrupted*; and
+  `millet_record.capture.recover_session(dir)` stitches leftover chunks
+  into the final WAV (repairing SIGKILL-damaged headers).
+
+### Legacy `meet` command (removed in 0.6.0)
+
+The pre-rename `meet` console script and the `meet_record` import alias
+were removed in `millet-record 0.6.0`, after the announced two-minor-version
+deprecation window.  Use `millet` / `millet_record`.
 
 ## Architecture
 
@@ -92,11 +110,6 @@ transition.
 - `millet_record.utils` — formatting helpers (HH:MM:SS, file sizes)
 - `millet_record.languages` — language constants used by capture flow
 - `millet_record.cli` — `millet` console-script entry point
-
-The legacy `meet_record` package name is still importable via a
-`sys.modules` alias + a meta-path finder, so existing
-`from meet_record.X import …` keeps working unchanged.  Removed in
-`millet-record 0.6.0`.
 
 `millet-pipeline` depends on this package and re-uses these modules,
 plus its own heavy modules (transcribe, label, voiceprint, summarize,

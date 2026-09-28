@@ -9,8 +9,7 @@ Provides the `millet` console script with capture-only subcommands:
 When the optional `millet-pipeline` package is installed, additional
 subcommands (transcribe, run, label, sync, gui, ...) are discovered
 through the `millet.subcommands` entry-point group and added
-dynamically.  The legacy `meet.subcommands` group is also consulted
-for one deprecation cycle (millet-pipeline 0.9.x).
+dynamically.
 
 This is the Click "plugin" pattern: every package wishing to extend the
 `millet` command registers Click command objects in `pyproject.toml`:
@@ -18,8 +17,10 @@ This is the Click "plugin" pattern: every package wishing to extend the
     [project.entry-points."millet.subcommands"]
     transcribe = "millet.cli:transcribe_cmd"
 
-A second entry point `meet` is also published that prints a deprecation
-warning and forwards to the same group.  Removed in millet-record 0.6.0.
+History: a second entry point `meet` (deprecation shim forwarding to the
+same group) and the legacy `meet.subcommands` entry-point group were
+both removed in millet-record 0.6.0 after the announced two-minor-version
+window.
 """
 from __future__ import annotations
 
@@ -143,10 +144,9 @@ def _load_plugin_subcommands(group: click.Group) -> None:
     command objects.  Failure to load any one plugin is logged but does
     not break the CLI.
 
-    For one deprecation cycle, the legacy `meet.subcommands` group is
-    also consulted — that's how millet-pipeline 0.9.x dual-publishes
-    so users on the old `meet` console-script alias still get the full
-    feature set.  Removed in millet-record 0.6.0.
+    The legacy `meet.subcommands` group was consulted for one deprecation
+    cycle (millet-pipeline 0.9.x dual-published both groups) and removed
+    in millet-record 0.6.0 together with the `meet` console script.
     """
     try:
         from importlib.metadata import entry_points
@@ -154,7 +154,7 @@ def _load_plugin_subcommands(group: click.Group) -> None:
         return
 
     eps_seen: set[str] = set()
-    for group_name in ("millet.subcommands", "meet.subcommands"):
+    for group_name in ("millet.subcommands",):
         try:
             eps = entry_points(group=group_name)
         except TypeError:
@@ -251,31 +251,6 @@ def main():
     pass
 
 
-def _deprecated_meet_main() -> None:
-    """Deprecation shim for the legacy ``meet`` console script.
-
-    Prints a one-time warning, then forwards to the ``millet`` group.
-    Removed in millet-record 0.6.0.
-    """
-    import os
-    import warnings
-    if os.environ.get("MILLET_SUPPRESS_DEPRECATION") != "1":
-        warnings.warn(
-            "The `meet` command is deprecated and will be removed in "
-            "millet-record 0.6.0.  Use `millet` instead.  Set "
-            "MILLET_SUPPRESS_DEPRECATION=1 to silence this warning.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # warnings module silently drops DeprecationWarning by default; also
-        # echo to stderr so the user actually sees it.
-        click.echo(
-            "warning: `meet` is deprecated; use `millet` instead.",
-            err=True,
-        )
-    main()
-
-
 # ─── record ──────────────────────────────────────────────────────────────────
 
 
@@ -302,7 +277,11 @@ def _deprecated_meet_main() -> None:
 )
 def record(output_dir, filename, mic, monitor, virtual_sink):
     """Record meeting audio. Press Ctrl+C to stop."""
-    from .capture import check_prerequisites, create_session
+    from .capture import (
+        RecordingInProgressError,
+        check_prerequisites,
+        create_session,
+    )
 
     issues = check_prerequisites()
     if issues:
@@ -329,7 +308,12 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
         )
     click.echo()
 
-    session.start()
+    try:
+        session.start()
+    except RecordingInProgressError as e:
+        # Lock contention is user-actionable, not a bug — no traceback.
+        click.echo(f"error: {e}", err=True)
+        sys.exit(2)
 
     # The recorder subprocess is start_new_session=True-detached, so it
     # never sees the terminal's signals itself — if this parent dies
@@ -505,11 +489,11 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
 
     \b
     Examples:
-        meet archive
-        meet archive --dry-run
-        meet archive --older-than 7
-        meet archive ~/meet-recordings/meeting-20260325-150203_LABEL
-        meet archive --keep-wav ~/meet-recordings/meeting-*
+        millet archive
+        millet archive --dry-run
+        millet archive --older-than 7
+        millet archive ~/meet-recordings/meeting-20260325-150203_LABEL
+        millet archive --keep-wav ~/meet-recordings/meeting-*
     """
     from .audio import compress_audio
 

@@ -20,6 +20,18 @@ Reliability features (apply to either backend):
   remains a runtime dep on macOS for stitching even when the recorder
   is the Swift sidecar)
 
+Crash/interrupt resilience (0.6.0):
+- ``recording.lock`` in the output root (PID-checked, stale-auto-reclaimed)
+  blocks a second recording while one is active — see
+  ``RecordingInProgressError``.  Set ``MEET_RECORD_LOCK=0`` to bypass.
+- ``<stem>.recorder.json`` marker written per spawned recorder (pid +
+  owner pid + start ticks), removed on clean stop/pause: lets any later
+  process tell "recording now" from "orphaned recorder" from "crashed".
+- ``<stem>.session.json`` is written at start (``status: recording``),
+  not only at stop, so an interrupted dir is self-describing.
+- ``find_interrupted_sessions()`` + ``recover_session()`` scan and
+  stitch dirs the parent never came back for.
+
 Stop protocol (both backends):
 - Write `b"q"` to stdin → graceful flush + exit 0 within 5 s
 - Escalate via SIGINT (5 s) → SIGTERM (3 s) → SIGKILL
@@ -256,6 +268,85 @@ def _repair_wav_header(path: Path) -> bool:
     return changed
 
 
+# ─── Process liveness, recording lock, recorder marker (0.6.0) ───────────────
+
+# Lock filename in the recording output root.  JSON content: pid,
+# pid_start_ticks, started_at, session_dir, output_file.
+_LOCK_FILENAME = "recording.lock"
+
+# Per-session marker written while a recorder process is alive.  Sits next
+# to ``<stem>.session.json`` / ``<stem>.ffmpeg.log``.
+_RECORDER_MARKER_SUFFIX = ".recorder.json"
+
+# Kill switch: MEET_RECORD_LOCK=0 disables the recording lock (matches the
+# MEET_RECORD_MAC=0 diagnostic-kill-switch convention).
+_LOCK_ENV = "MEET_RECORD_LOCK"
+
+
+class RecordingInProgressError(RuntimeError):
+    """Raised by ``start()`` when another live recording holds the lock.
+
+    ``holder`` is the parsed lock content (pid / started_at / session_dir
+    of the incumbent); ``lock_path`` points at the lock file for manual
+    inspection or removal.
+    """
+
+    def __init__(self, holder: dict, lock_path: Path):
+        self.holder = holder
+        self.lock_path = lock_path
+        super().__init__(
+            "Another recording is already active "
+            f"(pid {holder.get('pid', '?')}, started {holder.get('started_at', '?')}, "
+            f"session {holder.get('session_dir', '?')}). Stop that recording first. "
+            f"If the process is gone, delete the stale lock: {lock_path}"
+        )
+
+
+def _proc_start_ticks(pid: int) -> int | None:
+    """Process start time in clock ticks since boot, from /proc (Linux only).
+
+    Paired with the pid this survives pid reuse: a recycled pid with a
+    different start time is a different process.  Returns None on
+    non-Linux or on any read/parse failure — callers treat None as
+    "cannot verify" and fall back to bare pid liveness.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+        # comm (field 2) is parenthesised and may itself contain spaces or
+        # parens — fields resume after the LAST ')'.
+        rest = text[text.rindex(")") + 2:]
+        return int(rest.split()[19])  # field 22 overall = starttime
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _process_alive(pid: int | None, start_ticks: int | None = None) -> bool:
+    """Best-effort liveness check for a recorded pid.
+
+    start_ticks (from ``_proc_start_ticks`` at record time) guards against
+    pid reuse: a live pid whose current start time differs is a different
+    process.  When start_ticks is unknown or /proc is unavailable (macOS),
+    falls back to bare liveness.
+    """
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except OSError:
+        return False
+    if start_ticks is not None:
+        current = _proc_start_ticks(pid)
+        if current is not None and current != start_ticks:
+            return False  # pid was reused by a different process
+    return True
+
+
 # ─── Data classes ────────────────────────────────────────────────────────────
 
 
@@ -336,8 +427,23 @@ class RecordingSession:
     _mic_active_since_sys: float = field(default=0.0, repr=False)
     _last_channel_check: float = field(default=0.0, repr=False)
 
+    # Recording-lock state (0.6.0).  ``_lock_dir`` is the output root the
+    # lock guards; set by ``create_session`` (the recordings root, not the
+    # per-session subdir).  Direct ``RecordingSession(...)`` construction
+    # leaves it None → no locking.  ``_lock_path`` is non-None only while
+    # THIS session holds the lock (so _release_lock never deletes another
+    # session's lock).
+    _lock_dir: Path | None = field(default=None, repr=False)
+    _lock_path: Path | None = field(default=None, repr=False)
+
     def start(self) -> None:
-        """Start recording with watchdog monitoring."""
+        """Start recording with watchdog monitoring.
+
+        Raises RecordingInProgressError when another live recording holds
+        the output-root lock (see ``create_session`` / MEET_RECORD_LOCK).
+        """
+        self._acquire_lock()
+
         self._actual_monitor = self.monitor_source
 
         if self.use_virtual_sink:
@@ -359,6 +465,11 @@ class RecordingSession:
             "monitor_source": self._actual_monitor,
             "virtual_sink": self.use_virtual_sink,
             "output_file": str(self.output_file),
+            # 0.6.0: written to disk at start (status "recording") and
+            # rewritten at stop (status "stopped"), so a dir whose parent
+            # process died mid-recording is self-describing.
+            "status": "recording",
+            "owner_pid": os.getpid(),
         }
 
         self._stop_event.clear()
@@ -392,6 +503,107 @@ class RecordingSession:
             daemon=True,
         )
         self._watchdog_thread.start()
+
+        # 0.6.0: write the session metadata NOW (status "recording") so
+        # an interrupted session dir is self-describing even if stop()
+        # never runs.  Rewritten with final stats at stop().
+        self._write_session_meta()
+
+    def _write_session_meta(self) -> None:
+        """Best-effort write of ``<stem>.session.json`` (never raises)."""
+        meta_file = self.output_file.with_suffix(".session.json")
+        try:
+            meta_file.write_text(json.dumps(self._metadata, indent=2))
+        except OSError:
+            pass
+
+    # ── Recording lock + recorder marker (0.6.0) ─────────────────────────
+
+    def _acquire_lock(self) -> None:
+        """Take the output-root recording lock, reclaiming stale holders.
+
+        No-op when the session has no lock dir (direct construction) or
+        MEET_RECORD_LOCK=0.  Raises RecordingInProgressError when a live
+        process holds the lock.
+        """
+        if self._lock_dir is None or os.environ.get(_LOCK_ENV) == "0":
+            return
+        lock_path = self._lock_dir / _LOCK_FILENAME
+        holder = {
+            "pid": os.getpid(),
+            "pid_start_ticks": _proc_start_ticks(os.getpid()),
+            "started_at": datetime.now().isoformat(),
+            "session_dir": str(self.output_dir),
+            "output_file": str(self.output_file),
+        }
+        for attempt in (0, 1):
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                if attempt == 0 and self._reclaim_stale_lock(lock_path):
+                    continue
+                raise RecordingInProgressError(
+                    _read_json_quietly(lock_path), lock_path
+                ) from None
+            else:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(holder, f, indent=2)
+                self._lock_path = lock_path
+                return
+
+    def _reclaim_stale_lock(self, lock_path: Path) -> bool:
+        """Delete *lock_path* iff its recorded holder is dead. Never raises."""
+        holder = _read_json_quietly(lock_path)
+        if _process_alive(holder.get("pid"), holder.get("pid_start_ticks")):
+            return False  # genuinely held by a live process
+        try:
+            lock_path.unlink()
+        except OSError:
+            return False
+        return True
+
+    def _release_lock(self) -> None:
+        """Drop the lock if THIS session holds it. Never raises."""
+        path = self._lock_path
+        self._lock_path = None
+        if path is None:
+            return
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    def _recorder_marker_path(self) -> Path:
+        return self.output_file.with_suffix(_RECORDER_MARKER_SUFFIX)
+
+    def _write_recorder_marker(self, proc: subprocess.Popen, chunk_path: Path) -> None:
+        """Record the live recorder's identity for post-crash forensics.
+
+        Advisory: a write failure — or a process handle that doesn't
+        quack like Popen (test doubles) — must never fail the recording.
+        """
+        pid = getattr(proc, "pid", None)
+        if not pid:
+            return
+        marker = {
+            "pid": pid,
+            "pid_start_ticks": _proc_start_ticks(pid),
+            "owner_pid": os.getpid(),
+            "owner_start_ticks": _proc_start_ticks(os.getpid()),
+            "backend": "meet-record-mac" if _darwin_backend_enabled() else "ffmpeg",
+            "chunk": chunk_path.name,
+            "started_at": datetime.now().isoformat(),
+        }
+        try:
+            self._recorder_marker_path().write_text(json.dumps(marker, indent=2))
+        except OSError:
+            pass
+
+    def _remove_recorder_marker(self) -> None:
+        try:
+            self._recorder_marker_path().unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _cleanup_failed_start(self) -> None:
         """Best-effort teardown after a failed ``start()``.
@@ -427,6 +639,13 @@ class RecordingSession:
                     chunk.unlink()
             except OSError:
                 pass
+
+        # 0.6.0: mark the session as failed and drop the lock/marker so a
+        # later process doesn't see a phantom active recording.
+        self._metadata["status"] = "failed"
+        self._write_session_meta()
+        self._remove_recorder_marker()
+        self._release_lock()
 
     def stop(self) -> Path:
         """Stop recording, stitch chunks, and return the output file path.
@@ -465,6 +684,10 @@ class RecordingSession:
                     pass
                 self._ffmpeg_log = None
 
+        # The recorder process is gone (or the session was paused): the
+        # recorder marker must not outlive it.
+        self._remove_recorder_marker()
+
         if self.use_virtual_sink:
             self._teardown_virtual_sink()
 
@@ -500,6 +723,7 @@ class RecordingSession:
                     pass
 
         # Write session metadata
+        self._metadata["status"] = "stopped"
         self._metadata["stopped_at"] = datetime.now().isoformat()
         self._metadata["restart_count"] = self._restart_count
         self._metadata["chunk_count"] = len(valid_chunks)
@@ -532,8 +756,11 @@ class RecordingSession:
         log_path = self.output_file.with_suffix(".ffmpeg.log")
         self._metadata["stop_reason"] = _extract_last_stop_reason(log_path)
 
-        meta_file = self.output_file.with_suffix(".session.json")
-        meta_file.write_text(json.dumps(self._metadata, indent=2))
+        self._write_session_meta()
+
+        # Recording fully over — release the output-root lock last so the
+        # lock's "session active" semantics cover the whole lifecycle.
+        self._release_lock()
 
         return self.output_file
 
@@ -560,6 +787,10 @@ class RecordingSession:
             # Stop the current recorder process (finalizes the chunk WAV)
             self._stop_ffmpeg()
             self._paused = True
+
+        # No live recorder while paused — the marker must reflect that so
+        # an external scan doesn't report a phantom active recorder.
+        self._remove_recorder_marker()
 
     def resume(self) -> None:
         """Resume recording after a pause by starting a new chunk.
@@ -798,6 +1029,11 @@ class RecordingSession:
             stderr=self._ffmpeg_log,
             start_new_session=True,
         )
+        # 0.6.0: record the detached recorder's identity.  Because the
+        # recorder survives the parent's death (start_new_session=True),
+        # this marker is the only way a later process can distinguish
+        # "recording right now" from "orphaned recorder still writing".
+        self._write_recorder_marker(self._ffmpeg_proc, chunk_path)
         return self._ffmpeg_proc, chunk_path, log_path
 
     def _wait_for_recorder_data(
@@ -1064,57 +1300,7 @@ class RecordingSession:
 
     def _concat_chunks(self, chunks: list[Path]) -> None:
         """Concatenate multiple WAV chunks into the final output file."""
-        # Build ffmpeg concat demuxer input file
-        concat_list = tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".txt",
-            delete=False,
-            dir=self.output_dir,
-        )
-        try:
-            for chunk in chunks:
-                # ffmpeg concat requires single-quoted paths with escaped quotes
-                safe_path = str(chunk).replace("'", "'\\''")
-                concat_list.write(f"file '{safe_path}'\n")
-            concat_list.close()
-
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                concat_list.name,
-                "-c",
-                "copy",
-                str(self.output_file),
-            ]
-            # Stream-copy concat is I/O bound; budget generously (assume
-            # >= 20 MB/s) but never hang stop() forever on a wedged
-            # ffmpeg — subprocess.run kills the child on timeout.
-            try:
-                total_bytes = sum(c.stat().st_size for c in chunks)
-            except OSError:
-                total_bytes = 0
-            timeout = max(120.0, total_bytes / (20 * 1024 * 1024))
-            try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=timeout
-                )
-                concat_failed = result.returncode != 0
-            except subprocess.TimeoutExpired:
-                concat_failed = True
-            if concat_failed:
-                # Fallback: just use the largest chunk
-                largest = max(chunks, key=lambda c: c.stat().st_size)
-                largest.rename(self.output_file)
-        finally:
-            try:
-                Path(concat_list.name).unlink()
-            except OSError:
-                pass
+        _concat_wav_files(chunks, self.output_file, self.output_dir)
 
     # ── Virtual sink management ──────────────────────────────────────────
 
@@ -1256,6 +1442,7 @@ def create_session(
         output_dir = Path.home() / "meet-recordings"
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir = output_dir
 
     if filename is None:
         # Auto-generated name: create a per-session subdirectory so all
@@ -1280,13 +1467,257 @@ def create_session(
         mic_source = mic or get_default_source()
         monitor_source = monitor or get_monitor_source()
 
-    return RecordingSession(
+    session = RecordingSession(
         output_dir=output_dir,
         output_file=output_dir / filename,
         mic_source=mic_source,
         monitor_source=monitor_source,
         use_virtual_sink=virtual_sink,
     )
+    # The lock guards the recording ROOT (one active recording per root),
+    # not the per-session subdir, so concurrent sessions collide even
+    # though their output dirs differ.
+    session._lock_dir = lock_dir
+    return session
+
+
+# ─── Interrupted-session scan + recovery (0.6.0) ─────────────────────────────
+
+_CHUNK_RE = re.compile(r"^(?P<stem>.+)\.chunk-(?P<idx>\d+)\.wav$")
+
+
+def _read_json_quietly(path: Path) -> dict:
+    """Parse a JSON file into a dict; {} on missing/corrupt/wrong type."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _concat_wav_files(chunks: list[Path], output_file: Path, work_dir: Path) -> None:
+    """Concatenate WAV chunks into *output_file* via ffmpeg stream copy.
+
+    On any ffmpeg failure/timeout, falls back to the largest chunk so the
+    bulk of the audio is never lost to a stitching problem.
+    """
+    # Build ffmpeg concat demuxer input file
+    concat_list = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".txt",
+        delete=False,
+        dir=work_dir,
+    )
+    try:
+        for chunk in chunks:
+            # ffmpeg concat requires single-quoted paths with escaped quotes
+            safe_path = str(chunk).replace("'", "'\\''")
+            concat_list.write(f"file '{safe_path}'\n")
+        concat_list.close()
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list.name,
+            "-c",
+            "copy",
+            str(output_file),
+        ]
+        # Stream-copy concat is I/O bound; budget generously (assume
+        # >= 20 MB/s) but never hang forever on a wedged ffmpeg —
+        # subprocess.run kills the child on timeout.
+        try:
+            total_bytes = sum(c.stat().st_size for c in chunks)
+        except OSError:
+            total_bytes = 0
+        timeout = max(120.0, total_bytes / (20 * 1024 * 1024))
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            concat_failed = result.returncode != 0
+        except subprocess.TimeoutExpired:
+            concat_failed = True
+        if concat_failed:
+            # Fallback: just use the largest chunk
+            largest = max(chunks, key=lambda c: c.stat().st_size)
+            largest.rename(output_file)
+    finally:
+        try:
+            Path(concat_list.name).unlink()
+        except OSError:
+            pass
+
+
+@dataclass
+class InterruptedSession:
+    """A recording directory whose session never reached a clean ``stop()``.
+
+    ``recorder_alive``/``owner_alive`` distinguish the three states a
+    caller must handle differently:
+
+    * owner alive + recorder alive → recording in progress; leave it alone
+    * owner dead + recorder alive  → orphaned recorder (``orphaned``);
+      stop the recorder (SIGINT finalizes the chunk WAV), then recover
+    * recorder dead                → interrupted; just recover the chunks
+    """
+
+    session_dir: Path
+    chunks: list[Path]
+    total_bytes: int
+    recorder_pid: int | None  # from <stem>.recorder.json (0.6.0+), else None
+    recorder_alive: bool
+    owner_pid: int | None  # from marker or session meta, if known
+    owner_alive: bool
+    started_at: str | None  # ISO string from marker/session meta
+    backend: str | None  # "ffmpeg" | "meet-record-mac" | None (unknown)
+
+    @property
+    def orphaned(self) -> bool:
+        """Recorder still running but its controlling process is gone."""
+        return self.recorder_alive and not self.owner_alive
+
+
+def find_interrupted_sessions(root: str | Path) -> list[InterruptedSession]:
+    """Scan *root* (a recordings dir) for sessions that never finished.
+
+    A session dir counts as interrupted when it holds ``*.chunk-*.wav``
+    files but no stitched final ``<stem>.wav``.  Newest-first by directory
+    mtime.  Never raises on filesystem races — a dir that vanishes or
+    finishes mid-scan is simply skipped.
+    """
+    root = Path(root)
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return []
+
+    found: list[InterruptedSession] = []
+    for d in entries:
+        if not d.is_dir():
+            continue
+        chunks = sorted(p for p in d.glob("*.chunk-*.wav") if _CHUNK_RE.match(p.name))
+        if not chunks:
+            continue
+        stem = _CHUNK_RE.match(chunks[0].name).group("stem")  # type: ignore[union-attr]
+        if (d / f"{stem}.wav").exists():
+            continue  # finished (or already recovered)
+
+        marker = _read_json_quietly(d / f"{stem}{_RECORDER_MARKER_SUFFIX}")
+        meta = _read_json_quietly(d / f"{stem}.session.json")
+        recorder_pid = marker.get("pid")
+        owner_pid = marker.get("owner_pid") or meta.get("owner_pid")
+        try:
+            total = sum(c.stat().st_size for c in chunks)
+        except OSError:
+            total = 0
+        found.append(
+            InterruptedSession(
+                session_dir=d,
+                chunks=chunks,
+                total_bytes=total,
+                recorder_pid=recorder_pid,
+                recorder_alive=_process_alive(recorder_pid, marker.get("pid_start_ticks")),
+                owner_pid=owner_pid,
+                owner_alive=_process_alive(owner_pid, marker.get("owner_start_ticks")),
+                started_at=marker.get("started_at") or meta.get("started_at"),
+                backend=marker.get("backend"),
+            )
+        )
+
+    def _mtime(s: InterruptedSession) -> float:
+        try:
+            return s.session_dir.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    found.sort(key=_mtime, reverse=True)
+    return found
+
+
+def recover_session(session_dir: str | Path) -> Path:
+    """Stitch the leftover chunks of an interrupted recording into a WAV.
+
+    Repairs each chunk's WAV header first (a SIGKILLed recorder never
+    patched its RIFF/data sizes, and ffmpeg's concat trusts the header),
+    concatenates in chunk order, removes the chunk files, and marks the
+    session metadata ``status: "recovered"`` (creating a minimal one for
+    pre-0.6.0 dirs that never wrote one).
+
+    Returns the path to the recovered ``<stem>.wav``.
+
+    Raises:
+        FileNotFoundError: no (non-empty) chunk files in *session_dir*.
+        FileExistsError: the final WAV already exists — nothing to recover.
+        RuntimeError: a recorder is still writing into the directory;
+            stop it first (see ``find_interrupted_sessions``).
+    """
+    session_dir = Path(session_dir)
+    chunks = sorted(p for p in session_dir.glob("*.chunk-*.wav") if _CHUNK_RE.match(p.name))
+    if not chunks:
+        raise FileNotFoundError(f"no recording chunks found in {session_dir}")
+    stem = _CHUNK_RE.match(chunks[0].name).group("stem")  # type: ignore[union-attr]
+    output = session_dir / f"{stem}.wav"
+    if output.exists():
+        raise FileExistsError(f"{output} already exists; nothing to recover")
+
+    marker_path = session_dir / f"{stem}{_RECORDER_MARKER_SUFFIX}"
+    marker = _read_json_quietly(marker_path)
+    if _process_alive(marker.get("pid"), marker.get("pid_start_ticks")):
+        raise RuntimeError(
+            f"a recorder (pid {marker['pid']}) is still writing into {session_dir}; "
+            "stop it before recovering"
+        )
+
+    valid = [c for c in chunks if c.stat().st_size > 0]
+    for chunk in valid:
+        try:
+            _repair_wav_header(chunk)
+        except OSError:
+            pass
+    if not valid:
+        raise FileNotFoundError(f"all recording chunks in {session_dir} are empty")
+
+    if len(valid) == 1:
+        valid[0].rename(output)
+    else:
+        _concat_wav_files(valid, output, session_dir)
+
+    # Clean up any remaining chunk files
+    for chunk in chunks:
+        if chunk.exists() and chunk != output:
+            try:
+                chunk.unlink()
+            except OSError:
+                pass
+
+    meta_path = session_dir / f"{stem}.session.json"
+    meta = _read_json_quietly(meta_path)
+    meta.update(
+        {
+            "status": "recovered",
+            "recovered_at": datetime.now().isoformat(),
+            "chunk_count": len(valid),
+            "file_exists": True,
+            "file_size_bytes": output.stat().st_size,
+            "output_file": str(output),
+        }
+    )
+    try:
+        meta_path.write_text(json.dumps(meta, indent=2))
+    except OSError:
+        pass
+
+    # The marker describes a recorder that no longer exists.
+    try:
+        marker_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    return output
 
 
 def check_prerequisites() -> list[str]:
