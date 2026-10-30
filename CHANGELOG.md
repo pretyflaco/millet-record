@@ -5,6 +5,15 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Security
+
+- Ignore `meet-record-mac` on `PATH` by default so a writable PATH directory
+  cannot shadow the bundled sidecar.  `MEET_RECORD_MAC_PATH` and the bundled
+  binary retain precedence; `MEET_RECORD_MAC_DEV=1` explicitly restores PATH
+  lookup for development.
+
 ## v0.6.0 — 2026-09-28 — crash resilience: recording lock, recorder marker, interrupted-session recovery
 
 Incident 2026-09-28: a scribe's TUI died mid-recording.  The recorder —
