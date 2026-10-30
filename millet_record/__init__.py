@@ -20,4 +20,4 @@ both deprecation aliases were removed in 0.6.0 after the announced
 two-minor-version window.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"

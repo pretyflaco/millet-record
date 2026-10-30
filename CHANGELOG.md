@@ -5,7 +5,7 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## v0.6.1 — sidecar resolution hardening
 
 ### Security
 
@@ -13,6 +13,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cannot shadow the bundled sidecar.  `MEET_RECORD_MAC_PATH` and the bundled
   binary retain precedence; `MEET_RECORD_MAC_DEV=1` explicitly restores PATH
   lookup for development.
+
+### Tests
+
+- Full local suite: **105 passed**, including production PATH-shadowing and
+  explicit development-fallback coverage.
 
 ## v0.6.0 — 2026-09-28 — crash resilience: recording lock, recorder marker, interrupted-session recovery
 
