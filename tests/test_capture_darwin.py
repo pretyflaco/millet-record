@@ -7,7 +7,7 @@ meet-record-mac M5 CLI surface (see tests/conftest.py).
 These tests exercise:
 
 * ``_resolve_darwin_recorder``: env override, bundled location,
-  PATH fallback, missing-binary error.
+  development-only PATH fallback, missing-binary error.
 * ``_darwin_backend_enabled``: opt-in gate semantics.
 * ``_build_recorder_cmd_darwin``: argv shape regression-gates the M5
   CLI surface (--mic / --system / --sample-rate / --max-seconds).
@@ -53,69 +53,55 @@ def test_resolve_rejects_env_override_pointing_at_nonexistent_file(monkeypatch, 
 
 
 def test_resolve_finds_bundled_binary_when_env_unset(monkeypatch, tmp_path):
-    """Falls back to millet_record/_bin/meet-record-mac.
-
-    We can't write into the real millet_record/_bin during a test, so we
-    monkeypatch ``millet_record.capture.Path(__file__)`` semantics by
-    creating a fake _bin directory and pointing the resolver at it via
-    a temporary working module path injection.
-    """
+    """Falls back to millet_record/_bin/meet-record-mac."""
     monkeypatch.delenv("MEET_RECORD_MAC_PATH", raising=False)
+    monkeypatch.delenv("MEET_RECORD_MAC_DEV", raising=False)
+    monkeypatch.setattr(cap, "__file__", str(tmp_path / "capture.py"))
 
-    # Create a fake bundled binary in tmp_path/_bin/meet-record-mac and
-    # patch Path(__file__).parent to point at tmp_path. The cleanest way
-    # is to override the function entirely for this test.
     fake_bin = tmp_path / "_bin"
     fake_bin.mkdir()
     fake_recorder = fake_bin / "meet-record-mac"
     fake_recorder.write_text("mock")
     fake_recorder.chmod(fake_recorder.stat().st_mode | stat.S_IXUSR)
 
-    # Patch by overriding the path-building call. `Path(__file__).parent`
-    # is the only line referencing the bundle location; we monkey-patch
-    # the entire helper to use our tmp_path.
-    original = cap._resolve_darwin_recorder
-
-    def fake_resolve():
-        candidate = fake_bin / "meet-record-mac"
-        if candidate.is_file():
-            return candidate
-        return original()
-
-    monkeypatch.setattr(cap, "_resolve_darwin_recorder", fake_resolve)
     assert cap._resolve_darwin_recorder() == fake_recorder
 
 
-def test_resolve_falls_back_to_path(monkeypatch, tmp_path):
-    """If env var unset and no bundled binary, ``shutil.which`` is used."""
+def test_resolve_ignores_path_without_dev_opt_in(monkeypatch, tmp_path):
+    """PATH cannot shadow the bundled binary in production mode."""
     monkeypatch.delenv("MEET_RECORD_MAC_PATH", raising=False)
+    monkeypatch.delenv("MEET_RECORD_MAC_DEV", raising=False)
+    monkeypatch.setattr(cap, "__file__", str(tmp_path / "capture.py"))
 
-    # Place a fake binary in tmp_path and prepend tmp_path to PATH. If
-    # _resolve falls through to PATH, it should pick this one up.
     fake = tmp_path / "meet-record-mac"
     fake.write_text("#!/bin/sh\necho mock")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
 
-    # Ensure the bundled location is empty for this test. We can't easily
-    # invalidate it from Linux; if the test infra accidentally has a
-    # _bin/meet-record-mac (it won't on this branch but defensive), skip.
-    bundled = Path(cap.__file__).parent / "_bin" / "meet-record-mac"
-    if bundled.is_file():
-        pytest.skip("bundled binary present; cannot test PATH fallback in isolation")
-
-    resolved = cap._resolve_darwin_recorder()
-    assert resolved == fake
+    with pytest.raises(FileNotFoundError, match="meet-record-mac not found"):
+        cap._resolve_darwin_recorder()
 
 
-def test_resolve_raises_when_nothing_resolves(monkeypatch):
+def test_resolve_falls_back_to_path_with_dev_opt_in(monkeypatch, tmp_path):
+    """MEET_RECORD_MAC_DEV=1 explicitly enables the PATH fallback."""
+    monkeypatch.delenv("MEET_RECORD_MAC_PATH", raising=False)
+    monkeypatch.setenv("MEET_RECORD_MAC_DEV", "1")
+    monkeypatch.setattr(cap, "__file__", str(tmp_path / "capture.py"))
+
+    fake = tmp_path / "meet-record-mac"
+    fake.write_text("#!/bin/sh\necho mock")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+
+    assert cap._resolve_darwin_recorder() == fake
+
+
+def test_resolve_raises_when_nothing_resolves(monkeypatch, tmp_path):
     """No env override + no bundle + nothing on PATH → FileNotFoundError."""
     monkeypatch.delenv("MEET_RECORD_MAC_PATH", raising=False)
-    monkeypatch.setenv("PATH", "")  # empty PATH; shutil.which returns None
-
-    bundled = Path(cap.__file__).parent / "_bin" / "meet-record-mac"
-    if bundled.is_file():
-        pytest.skip("bundled binary present; cannot test missing-binary case")
+    monkeypatch.setenv("MEET_RECORD_MAC_DEV", "1")
+    monkeypatch.setattr(cap, "__file__", str(tmp_path / "capture.py"))
+    monkeypatch.setenv("PATH", "")
 
     with pytest.raises(FileNotFoundError, match="meet-record-mac not found"):
         cap._resolve_darwin_recorder()

@@ -272,9 +272,13 @@ not by the sidecar binary itself, except `MEET_RECORD_MAC_DEBUG` and
 - **`MEET_RECORD_MAC_PATH=<path>`** — override the resolved path to
   the `meet-record-mac` binary. Resolution order is
   `MEET_RECORD_MAC_PATH` → `meet_record/_bin/meet-record-mac` (the
-  pip-installed bundle location) → `meet-record-mac` on `PATH`.
-  Useful for running a `swift build` artefact against a pip-installed
-  package, or for pointing the test suite at a mock recorder.
+  pip-installed bundle location). Useful for running a `swift build`
+  artefact against a pip-installed package, or for pointing the test
+  suite at a mock recorder.
+
+- **`MEET_RECORD_MAC_DEV=1`** — explicitly enable the development-only
+  fallback to `meet-record-mac` on `PATH` when neither the path override
+  nor the bundled binary resolves. `PATH` is ignored by default.
 
 - **`MEET_RECORD_MAC_DEBUG=1`** — emit per-callback frame counts to
   stderr. Useful for tracing the mic and system push streams sample-

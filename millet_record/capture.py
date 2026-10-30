@@ -113,6 +113,7 @@ _DARWIN_OPT_IN_ENV = "MEET_RECORD_MAC"
 # manual smoke testing to validate a locally-built binary against a
 # pip-installed package.
 _DARWIN_RECORDER_PATH_ENV = "MEET_RECORD_MAC_PATH"
+_DARWIN_RECORDER_DEV_ENV = "MEET_RECORD_MAC_DEV"
 
 
 def _resolve_darwin_recorder() -> Path:
@@ -122,8 +123,8 @@ def _resolve_darwin_recorder() -> Path:
       1. ``MEET_RECORD_MAC_PATH`` env var (test/manual override).
       2. ``millet_record/_bin/meet-record-mac`` next to this module
          (the path the macOS arm64 wheel installs to).
-      3. ``meet-record-mac`` on ``PATH`` (development convenience for
-         running against a `swift build` artefact in a checkout).
+      3. ``meet-record-mac`` on ``PATH`` only when
+         ``MEET_RECORD_MAC_DEV=1`` (development opt-in).
 
     Raises FileNotFoundError if none of the above resolve.
     """
@@ -140,17 +141,18 @@ def _resolve_darwin_recorder() -> Path:
     if bundled.is_file():
         return bundled
 
-    # Fallback to PATH for development.
-    import shutil
+    if os.environ.get(_DARWIN_RECORDER_DEV_ENV, "").strip() == "1":
+        import shutil
 
-    on_path = shutil.which("meet-record-mac")
-    if on_path:
-        return Path(on_path)
+        on_path = shutil.which("meet-record-mac")
+        if on_path:
+            return Path(on_path)
 
     raise FileNotFoundError(
         "meet-record-mac not found. Install the macOS arm64 wheel of "
-        "meetscribe-record (which bundles it at millet_record/_bin/), set "
-        f"{_DARWIN_RECORDER_PATH_ENV} to a built binary, or add it to PATH."
+        "meetscribe-record (which bundles it at millet_record/_bin/) or set "
+        f"{_DARWIN_RECORDER_PATH_ENV} to a built binary. For development only, "
+        f"set {_DARWIN_RECORDER_DEV_ENV}=1 to allow PATH lookup."
     )
 
 
