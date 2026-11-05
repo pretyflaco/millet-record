@@ -27,7 +27,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## v0.6.0 — 2026-09-28 — crash resilience: recording lock, recorder marker, interrupted-session recovery
 
-Incident 2026-09-28: a scribe's TUI died mid-recording.  The recorder —
+A scribe's TUI died mid-recording.  The recorder —
 deliberately `start_new_session=True`-detached so the meeting survives a
 UI crash — kept writing as an orphan for 12 more minutes, capturing two
 *subsequent* meetings into the dead session's file.  Meanwhile the
