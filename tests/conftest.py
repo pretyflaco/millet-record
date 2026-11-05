@@ -38,7 +38,7 @@ What we deliberately don't model:
   RIFF trailer; ``ffprobe`` will recognise the file as a WAV but the
   data isn't audibly meaningful. No test reads the audio back.
 * TCC permission prompts on first run. probe-permissions just returns
-  the canned status; the real macOS first-launch prompt is patternn's
+  the canned status; the real macOS first-launch prompt is a tester's
   M6c.ii territory.
 """
 

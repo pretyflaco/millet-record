@@ -7,7 +7,7 @@
 //
 // History: shipped in M4.5 as diagnostic-only with default 1.0 (no-op,
 // M4.2 behavior preserved). Promoted to the production gain stage in
-// M4.5b after patternn's matrix data showed gain=4.0 cleanly closes
+// M4.5b after a tester's matrix data showed gain=4.0 cleanly closes
 // the Apple Silicon mic-vs-tap level gap; see MicCapture.defaultGain
 // for the full decision audit. The `MEET_RECORD_MAC_MIC_GAIN` env var
 // remains as the user-side override.

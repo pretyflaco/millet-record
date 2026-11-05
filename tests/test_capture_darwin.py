@@ -438,7 +438,7 @@ def test_e2e_normal_recording_stops_via_q_byte(monkeypatch, tmp_path, darwin_env
     assert meta_path.exists()
     meta = _json.loads(meta_path.read_text())
     assert "stop_reason" in meta, (
-        "session.json must carry stop_reason (F7, reported by @patternn in M8)"
+        "session.json must carry stop_reason (F7, reported in M8 macOS validation)"
     )
     assert meta["stop_reason"] == "stdin-q", (
         f"expected stop_reason='stdin-q' (q-byte path); got {meta['stop_reason']!r}. "

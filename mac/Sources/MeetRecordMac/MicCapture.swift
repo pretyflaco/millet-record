@@ -33,7 +33,7 @@ final class MicCapture {
     /// (`meet/transcribe.py:_label_speakers_from_channels`) fail to
     /// recognize the local scribe (you_ratio ~0.09 < 0.15 threshold).
     ///
-    /// 4.0× (≈ +12 dB) was chosen over 8.0× (≈ +18 dB) on patternn's M4.5
+    /// 4.0× (≈ +12 dB) was chosen over 8.0× (≈ +18 dB) on a tester's M4.5
     /// matrix data:
     ///   - 4.0× yields you_ratio ≈ 0.27, comfortably past the 0.15 floor
     ///   - 4.0× preserves 8.7 dB of peak headroom (vs 2.6 dB at 8.0×)

@@ -187,7 +187,7 @@ final class Mixer {
     /// at the boundary. Cost: drops at most one drain-interval worth of
     /// the over-running channel (~20 ms by default). Without this, the
     /// final emit could pair real audio against zeros, producing the
-    /// audible end-of-stream artifact that @patternn flagged in M4
+    /// audible end-of-stream artifact that a tester flagged in M4
     /// (PR #3 review).
     func stopAndFlush() {
         timer?.cancel()
@@ -210,7 +210,7 @@ final class Mixer {
     /// channel. That inflated the recording timeline by the producer
     /// burstiness ratio (~1.8–2.1× in practice on Apple Silicon, where
     /// the mic delivers in ~100 ms bursts and the system tap delivers in
-    /// ~10 ms slices). Patternn's M4.1 smoke test surfaced this as the
+    /// ~10 ms slices). A tester's M4.1 smoke test surfaced this as the
     /// 9 s vs 5 s drift; M4.2 fixed it by switching to `min(...)`.
     ///
     /// Internal (not private) so MixerTests can invoke it deterministically

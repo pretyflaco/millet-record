@@ -10,7 +10,7 @@ the repo root).
 ## Status
 
 **Default macOS recording backend** as of `meetscribe-record` 0.2.0
-(M6c.ii.c, post-patternn M6c.ii.b sign-off). `meet record` shells out
+(M6c.ii.c, post-tester M6c.ii.b sign-off). `meet record` shells out
 to this binary on darwin without any opt-in env var; set
 `MEET_RECORD_MAC=0` from `meetscribe-record`'s parent process to force
 the legacy ffmpeg+PulseAudio path (which fails on a stock macOS
@@ -249,7 +249,7 @@ ffmpeg -hide_banner -i /tmp/right.wav -af volumedetect -f null - 2>&1 | grep vol
 ```
 
 Expected M4.5b result: both channels carry meaningful audio. Reference
-measurements from patternn's M1 with the production default (gain=4.0):
+measurements from a tester's M1 with the production default (gain=4.0):
 left mean ≈ −24 dB, right mean ≈ −15 dB, gap ≈ 9 dB; left peak ≈ −9 dB
 leaves >8 dB of headroom and the tanh soft-clip stays inactive on
 normal speech. Concrete absolute levels depend on your hardware and
@@ -291,11 +291,11 @@ not by the sidecar binary itself, except `MEET_RECORD_MAC_DEBUG` and
   - `=1` reproduces M4.2 behavior (no gain). Useful for debugging the
     raw input level on hardware that may differ from M1.
   - `=4` matches the production default (no-op vs unset).
-  - `=8` ≈ +18 dB. patternn's M4.5 testing showed this engages the
+  - `=8` ≈ +18 dB. A tester's M4.5 testing showed this engages the
     soft-clip on speech peaks and audibly amplifies the mic noise
     floor in silences. Not recommended.
 
-  The default of 4.0× was picked from patternn's M4.5 matrix data on
+  The default of 4.0× was picked from a tester's M4.5 matrix data on
   M1; see `MicCapture.defaultGain` doc and pretyflaco/meetscribe-record#6
   for the full audit. If you observe the default is wrong for your
   hardware, file an issue with a `done:` summary at gain=1 plus L/R

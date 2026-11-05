@@ -13,7 +13,7 @@ readme = "README.md"
 # message) instead. Relax once coincurve ships cp314 wheels.
 requires-python = ">=3.10,<3.14"
 license = {text = "GPL-3.0-or-later"}
-authors = [{name = "pretyflaco"}]
+authors = [{name = "twentyone.ist"}]
 keywords = [
     "meeting",
     "recording",
