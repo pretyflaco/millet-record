@@ -5,7 +5,7 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased — no deployment- or organization-specific references
+## v0.6.2 — no deployment- or organization-specific references
 
 * Package author is `twentyone.ist`.
 * Comments, docs and older CHANGELOG entries no longer name testers or link
