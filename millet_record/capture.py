@@ -159,7 +159,7 @@ def _resolve_darwin_recorder() -> Path:
 def _darwin_backend_enabled() -> bool:
     """True iff the macOS sidecar backend should be used.
 
-    Default-ON on darwin as of 0.2.0 (M6c.ii.c, post-patternn M6c.ii.b
+    Default-ON on darwin as of 0.2.0 (M6c.ii.c, post-tester M6c.ii.b
     sign-off). Set ``MEET_RECORD_MAC=0`` to force the legacy ffmpeg+
     PulseAudio path; any other value (unset, "1", "yes", empty string,
     typos) keeps the sidecar enabled so an accidentally-misset value
@@ -743,7 +743,7 @@ class RecordingSession:
         self._metadata["system_ever_active"] = self._system_ever_active
         self._metadata["system_silent_detected"] = self._system_silent_detected
 
-        # F7 fix (M8, reported by @patternn 2026-05-17): propagate
+        # F7 fix (M8, reported in macOS validation): propagate
         # ``stop_reason`` from the recorder log into session.json.
         # The recorder (Mac sidecar via meet-record-mac, Linux via ffmpeg)
         # prints a ``stop_reason: <value>`` line per chunk into the shared
@@ -1012,7 +1012,7 @@ class RecordingSession:
         # write via `_stop_ffmpeg`. The recorder exits first via the
         # signal (clean exit code 0); the parent's watchdog sees an
         # unexpected exit and triggers a spurious restart cycle —
-        # observed in @patternn's M6c.ii integration round as
+        # observed in a tester's M6c.ii integration round as
         # `restart_count: 1`, `chunk_count: 2`, with Chunk 0
         # `stop_reason: SIGINT` and Chunk 1 `stop_reason: stdin-q`.
         #

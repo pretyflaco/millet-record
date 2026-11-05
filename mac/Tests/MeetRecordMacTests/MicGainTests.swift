@@ -132,7 +132,7 @@ final class MicGainTests: XCTestCase {
     /// change, the failure message points them at the audit trail.
     ///
     /// Decision data in pretyflaco/meetscribe-record#6:
-    ///   - patternn's M4.5 matrix on Apple M1: speech-active L mean
+    ///   - a tester's M4.5 matrix on Apple M1: speech-active L mean
     ///     -35.0/-24.3/-18.5 dB at gain 1/4/8, R stable at -15.x dB
     ///   - gain=4 → labeler you_ratio 0.27 (1.79× past 0.15 floor),
     ///             8.7 dB peak headroom, soft-clip not engaging

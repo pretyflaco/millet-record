@@ -5,6 +5,12 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — no deployment- or organization-specific references
+
+* Package author is `twentyone.ist`.
+* Comments, docs and older CHANGELOG entries no longer name testers or link
+  to a former organization's private repository.
+
 ## v0.6.1 — sidecar resolution hardening
 
 ### Security
@@ -337,7 +343,7 @@ without showing any UI.  Idempotent and backward-compatible.
 ### Fixed
 
 - **`session.json` now carries `stop_reason`.**  Regression vs
-  0.2.0a1, caught by @patternn in M8 macOS-local validation.
+  0.2.0a1, caught in M8 macOS-local validation.
 
 ---
 
@@ -373,7 +379,7 @@ This release closes the M6 arc on epic [#1](https://github.com/pretyflaco/meetsc
 ### Validation
 
 The macOS recording pipeline was validated end-to-end on an Apple M1
-(macOS 26.4.1, ffmpeg 8.0.1) across patternn rounds:
+(macOS 26.4.1, ffmpeg 8.0.1) across tester rounds:
 
 - **M6c.ii** (2026-05-10): audio-path validation.  Left channel mean
   −23.9 dB on controlled speech; `you_ratio = 0.242`, 1.61× past the
@@ -394,7 +400,7 @@ The macOS recording pipeline was validated end-to-end on an Apple M1
 - PyPI publish for 0.2.0 was not automated; the artifacts are on the
   [GitHub release](https://github.com/pretyflaco/meetscribe-record/releases/tag/record-v0.2.0).
   v0.2.1 was the first real PyPI push after this; 0.2.0 itself never
-  reached PyPI (see notes in vezir's 2026-05-18 update on [blink-wip#639](https://github.com/blinkbitcoin/blink-wip/issues/639)).
+  reached PyPI.
 
 ### Requirements
 

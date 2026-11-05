@@ -133,7 +133,7 @@ final class MixerTests: XCTestCase {
     /// If one channel is shorter at flush time, we **truncate to min** so we
     /// don't write a chunk of zero-padded silence at the boundary. Drops at
     /// most one drain-interval (~20 ms) of the over-running channel. This
-    /// addresses the end-of-stream "deformation" @patternn flagged in M4
+    /// addresses the end-of-stream "deformation" a tester flagged in M4
     /// review.
     ///
     /// Push 50 mic + 200 sys samples; expect 50 paired frames in the WAV
@@ -192,7 +192,7 @@ final class MixerTests: XCTestCase {
     /// buffered for the next drain; we never zero-pad mid-stream.
     ///
     /// **History note:** an earlier version of this test asserted the
-    /// `max(...)` semantics that produced @patternn's M4 9 s vs 5 s drift —
+    /// `max(...)` semantics that produced a tester's M4 9 s vs 5 s drift —
     /// the assertion encoded the bug as expected behavior, so CI passed
     /// while the real recording was broken. Lesson: a passing test is
     /// only as good as the invariant it encodes.
@@ -270,7 +270,7 @@ final class MixerTests: XCTestCase {
     }
 
     /// **Regression gate for the M4 bursty-producer bug.** Simulates
-    /// @patternn's actual M4.1 delivery pattern: the system tap delivers
+    /// A tester's actual M4.1 delivery pattern: the system tap delivers
     /// in fine slices (~170 frames every ~10 ms) while the mic delivers
     /// in larger bursts (~1664 frames every ~100 ms). Under the old
     /// `max(...)` + zero-pad semantics, a single drain that saw a fresh
