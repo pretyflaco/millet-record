@@ -136,6 +136,8 @@ def _sample_pcm16_wav_tail_rms(
             riff = f.read(12)
             if len(riff) < 12 or riff[0:4] != b"RIFF" or riff[8:12] != b"WAVE":
                 return _FALLBACK
+            riff_size = int.from_bytes(riff[4:8], "little")
+            riff_end = 8 + riff_size
 
             audio_fmt = 0
             n_channels = 0
@@ -182,12 +184,17 @@ def _sample_pcm16_wav_tail_rms(
             if audio_fmt != 1 or bits_per_sample != 16:
                 return _FALLBACK
 
-            # Honor a valid finalized positive data chunk size so trailing
-            # metadata chunks (e.g. LIST/INFO) are never mistaken for PCM
-            # audio. Fall back to physical file size only for live-writer
-            # sentinel sizes (0 or 0xFFFFFFFF).
+            # Honor data_size for coherent finalized containers (so trailing
+            # LIST/INFO metadata chunks are never read as PCM), while using
+            # physical file size for live writers whose RIFF/data headers are
+            # zero, 0xFFFFFFFF, or positive-but-stale (e.g. MeetRecordMac's
+            # WavWriter patches header sizes every 10 s while appending PCM).
             phys_avail = max(0, file_size - data_offset)
-            if 0 < data_size < 0xFFFFFFFF:
+            riff_coherent = (
+                0 < riff_size < 0xFFFFFFFF
+                and riff_end >= file_size - 1
+            )
+            if 0 < data_size < 0xFFFFFFFF and riff_coherent:
                 avail = min(data_size, phys_avail)
             else:
                 avail = phys_avail

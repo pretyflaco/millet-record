@@ -145,6 +145,34 @@ def test_sample_channel_rms_live_sentinel_0xffffffff_uses_physical_size(
     assert abs(res[1] - 1500.0) < 1.0
 
 
+def test_sample_channel_rms_stale_positive_live_header_reads_physical_tail(
+    tmp_path: Path, monkeypatch
+):
+    """Model MeetRecordMac WavWriter's 10s-stale positive header during live capture.
+
+    When RIFF/data sizes reflect an earlier header patch (10s of 1000-level PCM)
+    while newer PCM (10s of 3000-level PCM) has been appended physically, the
+    live tail check must read the appended audio rather than the stale prefix.
+    """
+    sr = 16000
+    old_pcm = np.full(sr * 10 * 2, 1000, dtype="<i2").tobytes()
+    new_pcm = np.full(sr * 10 * 2, 3000, dtype="<i2").tobytes()
+    # Header was last patched at the 10-second mark (riff_size + data_size = old_pcm only).
+    base_wav = _build_raw_wav(sr=sr, data_payload=old_pcm)
+    wav_path = tmp_path / "live_stale.wav"
+    wav_path.write_bytes(base_wav + new_pcm)
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not fork")),
+    )
+    res = audio.sample_channel_rms(wav_path, tail_seconds=8.0)
+    assert res is not None
+    assert abs(res[0] - 3000.0) < 1.0
+    assert abs(res[1] - 3000.0) < 1.0
+
+
 def test_sample_channel_rms_non_pcm16_wav_falls_back(tmp_path: Path):
     """24-bit PCM, IEEE float (fmt=3), and A-law (fmt=6) must return _FALLBACK."""
     cases = [
