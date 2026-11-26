@@ -119,7 +119,7 @@ def _active_rms(ch: np.ndarray) -> float:
 def _sample_pcm16_wav_tail_rms(
     audio_path: Path,
     tail_seconds: float,
-) -> tuple[float, float] | None | object:
+) -> tuple[float, float] | object | None:
     """Zero-fork fast path for live/uncompressed stereo PCM16 WAV files.
 
     Returns:
@@ -142,6 +142,7 @@ def _sample_pcm16_wav_tail_rms(
             sample_rate = 0
             bits_per_sample = 0
             data_offset: int | None = None
+            data_size = 0
 
             offset = 12
             for _ in range(64):
@@ -165,6 +166,7 @@ def _sample_pcm16_wav_tail_rms(
                     bits_per_sample = int.from_bytes(fmt[14:16], "little")
                 elif cid == b"data":
                     data_offset = body_offset
+                    data_size = csize
                     break
 
                 # Guard against corrupt/0-size non-data chunks spinning forever.
@@ -180,10 +182,15 @@ def _sample_pcm16_wav_tail_rms(
             if audio_fmt != 1 or bits_per_sample != 16:
                 return _FALLBACK
 
-            # Trust actual on-disk bytes rather than the WAV header's data
-            # size, which stays 0 (or stale) while ffmpeg/sidecar is actively
-            # writing the live chunk.
-            avail = file_size - data_offset
+            # Honor a valid finalized positive data chunk size so trailing
+            # metadata chunks (e.g. LIST/INFO) are never mistaken for PCM
+            # audio. Fall back to physical file size only for live-writer
+            # sentinel sizes (0 or 0xFFFFFFFF).
+            phys_avail = max(0, file_size - data_offset)
+            if 0 < data_size < 0xFFFFFFFF:
+                avail = min(data_size, phys_avail)
+            else:
+                avail = phys_avail
             frame_bytes = 4  # 2 channels * 2 bytes (s16le)
             if avail < frame_bytes:
                 return None

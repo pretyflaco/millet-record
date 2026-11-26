@@ -80,3 +80,107 @@ def test_default_drain_seconds_is_backend_aware(monkeypatch):
 
     monkeypatch.setattr(capture, "_darwin_backend_enabled", lambda: False)
     assert capture.default_drain_seconds() == capture.DRAIN_SECONDS == 10
+
+
+def _build_raw_wav(
+    *,
+    audio_fmt: int = 1,
+    channels: int = 2,
+    sr: int = 16000,
+    bits_per_sample: int = 16,
+    data_payload: bytes = b"",
+    declared_data_size: int | None = None,
+    trailing_chunks: bytes = b"",
+) -> bytes:
+    block_align = channels * (bits_per_sample // 8)
+    byte_rate = sr * block_align
+    fmt_body = struct.pack(
+        "<HHIIHH", audio_fmt, channels, sr, byte_rate, block_align, bits_per_sample
+    )
+    fmt_chunk = b"fmt " + struct.pack("<I", len(fmt_body)) + fmt_body
+    dsize = len(data_payload) if declared_data_size is None else declared_data_size
+    data_chunk = b"data" + struct.pack("<I", dsize) + data_payload
+    body = b"WAVE" + fmt_chunk + data_chunk + trailing_chunks
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def test_sample_channel_rms_ignores_trailing_list_metadata_chunk(
+    tmp_path: Path, monkeypatch
+):
+    """Trailing LIST/INFO chunks after `data` must never be decoded as PCM."""
+    # 4 bytes of silent stereo PCM16 followed by a 64 KB LIST chunk filled with
+    # loud int16-valued bytes (2000).
+    loud_meta = np.full(32000, 2000, dtype="<i2").tobytes()
+    list_chunk = b"LIST" + struct.pack("<I", len(loud_meta)) + loud_meta
+    wav_path = tmp_path / "with_list.wav"
+    wav_path.write_bytes(
+        _build_raw_wav(data_payload=b"\x00\x00\x00\x00", trailing_chunks=list_chunk)
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not fork")),
+    )
+    res = audio.sample_channel_rms(wav_path, tail_seconds=2.0)
+    assert res == (0.0, 0.0)
+
+
+def test_sample_channel_rms_live_sentinel_0xffffffff_uses_physical_size(
+    tmp_path: Path, monkeypatch
+):
+    payload = np.full(16000 * 2, 1500, dtype="<i2").tobytes()
+    wav_path = tmp_path / "streaming.wav"
+    wav_path.write_bytes(
+        _build_raw_wav(data_payload=payload, declared_data_size=0xFFFFFFFF)
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not fork")),
+    )
+    res = audio.sample_channel_rms(wav_path, tail_seconds=1.0)
+    assert res is not None
+    assert abs(res[0] - 1500.0) < 1.0
+    assert abs(res[1] - 1500.0) < 1.0
+
+
+def test_sample_channel_rms_non_pcm16_wav_falls_back(tmp_path: Path):
+    """24-bit PCM, IEEE float (fmt=3), and A-law (fmt=6) must return _FALLBACK."""
+    cases = [
+        ("pcm24.wav", 1, 24, b"\x00" * 60),
+        ("float32.wav", 3, 32, b"\x00" * 80),
+        ("alaw.wav", 6, 8, b"\x00" * 40),
+    ]
+    for name, fmt, bits, payload in cases:
+        p = tmp_path / name
+        p.write_bytes(_build_raw_wav(audio_fmt=fmt, bits_per_sample=bits, data_payload=payload))
+        assert audio._sample_pcm16_wav_tail_rms(p, 2.0) is audio._FALLBACK
+
+
+def test_sample_channel_rms_truncated_and_empty_wav(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not fork")),
+    )
+    empty = tmp_path / "empty.wav"
+    empty.write_bytes(b"")
+    assert audio.sample_channel_rms(empty) is None
+
+    short_hdr = tmp_path / "short.wav"
+    short_hdr.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+    assert audio.sample_channel_rms(short_hdr) is None
+
+    header_only = tmp_path / "header_only.wav"
+    header_only.write_bytes(_build_raw_wav(data_payload=b""))
+    assert audio.sample_channel_rms(header_only) is None
+
+    # Declared 4000 bytes of data, but file truncated to 40 bytes (10 frames) of 1000.
+    trunc_payload = np.full(20, 1000, dtype="<i2").tobytes()
+    trunc = tmp_path / "truncated.wav"
+    trunc.write_bytes(_build_raw_wav(data_payload=trunc_payload, declared_data_size=4000))
+    res = audio.sample_channel_rms(trunc, tail_seconds=1.0)
+    assert res is not None
+    assert abs(res[0] - 1000.0) < 1.0
+    assert abs(res[1] - 1000.0) < 1.0

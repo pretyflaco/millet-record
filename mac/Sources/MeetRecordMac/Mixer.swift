@@ -266,16 +266,15 @@ final class Mixer {
     func drainOnce() {
         let micAvail = micBuffer.available
         let sysAvail = sysBuffer.available
-        // Either side empty → emit nothing this tick. The faster side's
-        // samples stay buffered until the slower side catches up.
-        if micAvail == 0 || sysAvail == 0 { return }
+        if micAvail > 0 && sysAvail > 0 {
+            let n = min(micAvail, sysAvail)
+            let mic = micBuffer.pop(maxCount: n)
+            let sys = sysBuffer.pop(maxCount: n)
+            emit(micFrames: mic, sysFrames: sys)
+        }
 
-        let n = min(micAvail, sysAvail)
-        let mic = micBuffer.pop(maxCount: n)
-        let sys = sysBuffer.pop(maxCount: n)
-        emit(micFrames: mic, sysFrames: sys)
-
-        // Bound accumulated clock skew between independent hardware audio clocks.
+        // Bound accumulated clock skew — including when one channel stops
+        // producing altogether — so buffered memory stays strictly capped.
         if maxSkewFrames > 0 {
             let excessMic = micBuffer.available - maxSkewFrames
             if excessMic > 0 {
