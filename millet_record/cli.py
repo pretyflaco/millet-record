@@ -32,14 +32,17 @@ from pathlib import Path
 
 import click
 
-from .capture import DRAIN_SECONDS
+from .capture import default_drain_seconds
 from .utils import fmt_elapsed, fmt_size
 
 # ─── Drain countdown + recording loop ────────────────────────────────────────
 
 
-def _drain_countdown(session, seconds: int = DRAIN_SECONDS) -> None:
-    """Keep recording for *seconds* more to let ffmpeg's delayed pipeline flush.
+def _drain_countdown(session, seconds: int | None = None) -> None:
+    """Keep recording for *seconds* more to let the recorder pipeline flush.
+
+    Defaults to :func:`default_drain_seconds` (10s for Linux ffmpeg's buffered
+    pipeline, 1s for the macOS Swift sidecar).
 
     During the countdown:
     - Additional Ctrl+C signals are ignored (SIGINT → SIG_IGN)
@@ -47,6 +50,8 @@ def _drain_countdown(session, seconds: int = DRAIN_SECONDS) -> None:
       elapsed recording time, and file size
     After the countdown, default SIGINT handling is restored.
     """
+    if seconds is None:
+        seconds = default_drain_seconds()
     prev_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         for remaining in range(seconds, 0, -1):

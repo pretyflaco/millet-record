@@ -106,6 +106,108 @@ def read_stereo_channels(audio_path: Path) -> StereoChannels | None:
 _SILENCE_THRESHOLD = 50.0
 
 
+_FALLBACK = object()
+
+
+def _active_rms(ch: np.ndarray) -> float:
+    active = ch[np.abs(ch) > _SILENCE_THRESHOLD]
+    if active.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(active**2)))
+
+
+def _sample_pcm16_wav_tail_rms(
+    audio_path: Path,
+    tail_seconds: float,
+) -> tuple[float, float] | None | object:
+    """Zero-fork fast path for live/uncompressed stereo PCM16 WAV files.
+
+    Returns:
+      * ``(mic_rms, sys_rms)`` for a stereo 16-bit PCM WAV with >=1 frame.
+      * ``None`` if it is a valid WAV that is mono or has no audio frames yet.
+      * ``_FALLBACK`` if the file is not a standard PCM16 WAV (e.g. OGG/Opus,
+        FLAC, float WAV) so the caller falls through to ffprobe/ffmpeg.
+    """
+    try:
+        file_size = audio_path.stat().st_size
+        if file_size < 44:
+            return None
+        with audio_path.open("rb") as f:
+            riff = f.read(12)
+            if len(riff) < 12 or riff[0:4] != b"RIFF" or riff[8:12] != b"WAVE":
+                return _FALLBACK
+
+            audio_fmt = 0
+            n_channels = 0
+            sample_rate = 0
+            bits_per_sample = 0
+            data_offset: int | None = None
+
+            offset = 12
+            for _ in range(64):
+                if offset + 8 > file_size:
+                    break
+                f.seek(offset)
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                cid = hdr[0:4]
+                csize = int.from_bytes(hdr[4:8], "little")
+                body_offset = offset + 8
+
+                if cid == b"fmt " and csize >= 16:
+                    fmt = f.read(16)
+                    if len(fmt) < 16:
+                        return _FALLBACK
+                    audio_fmt = int.from_bytes(fmt[0:2], "little")
+                    n_channels = int.from_bytes(fmt[2:4], "little")
+                    sample_rate = int.from_bytes(fmt[4:8], "little")
+                    bits_per_sample = int.from_bytes(fmt[14:16], "little")
+                elif cid == b"data":
+                    data_offset = body_offset
+                    break
+
+                # Guard against corrupt/0-size non-data chunks spinning forever.
+                step = 8 + csize + (csize & 1)
+                if step <= 0:
+                    return _FALLBACK
+                offset += step
+
+            if data_offset is None or sample_rate <= 0:
+                return _FALLBACK
+            if n_channels != 2:
+                return None
+            if audio_fmt != 1 or bits_per_sample != 16:
+                return _FALLBACK
+
+            # Trust actual on-disk bytes rather than the WAV header's data
+            # size, which stays 0 (or stale) while ffmpeg/sidecar is actively
+            # writing the live chunk.
+            avail = file_size - data_offset
+            frame_bytes = 4  # 2 channels * 2 bytes (s16le)
+            if avail < frame_bytes:
+                return None
+
+            tail_frames = max(1, round(tail_seconds * sample_rate))
+            tail_bytes = min(avail, tail_frames * frame_bytes)
+            skip = ((avail - tail_bytes) // frame_bytes) * frame_bytes
+            read_len = ((avail - skip) // frame_bytes) * frame_bytes
+            if read_len < frame_bytes:
+                return None
+
+            f.seek(data_offset + skip)
+            raw = f.read(read_len)
+    except OSError:
+        return None
+
+    samples = np.frombuffer(raw, dtype=np.int16)
+    usable = (len(samples) // 2) * 2
+    if usable < 2:
+        return None
+    stereo = samples[:usable].reshape(-1, 2).astype(np.float32)
+    return _active_rms(stereo[:, 0]), _active_rms(stereo[:, 1])
+
+
 def sample_channel_rms(
     audio_path: Path,
     *,
@@ -113,10 +215,10 @@ def sample_channel_rms(
 ) -> tuple[float, float] | None:
     """Measure recent per-channel active RMS from the tail of a stereo file.
 
-    Reads only the last ``tail_seconds`` of ``audio_path`` (via ffmpeg's
-    ``-sseof`` end-relative seek) so it stays cheap on a large, still-growing
-    recording chunk and reflects the *current* state of each channel rather
-    than the whole file.
+    For uncompressed stereo PCM16 WAV files (the live recording chunks written
+    by ffmpeg and the macOS sidecar), reads the tail directly in Python with
+    zero subprocess forks.  Falls back to ``ffprobe`` + ``ffmpeg -sseof`` for
+    compressed formats (OGG/Opus, FLAC, …).
 
     Returns ``(mic_rms, system_rms)`` computed over active samples only
     (those above the silence floor), or ``None`` if the file is mono, cannot
@@ -124,6 +226,10 @@ def sample_channel_rms(
     "unknown" (never as "silent").
     """
     audio_path = Path(audio_path)
+
+    fast = _sample_pcm16_wav_tail_rms(audio_path, tail_seconds)
+    if fast is not _FALLBACK:
+        return fast  # type: ignore[return-value]
 
     # Probe channel count / sample rate first.
     probe_cmd = [
@@ -173,16 +279,7 @@ def sample_channel_rms(
     if len(samples) % 2 != 0:
         samples = samples[:-1]
     stereo = samples.reshape(-1, 2).astype(np.float32)
-    mic = stereo[:, 0]
-    system = stereo[:, 1]
-
-    def _active_rms(ch: np.ndarray) -> float:
-        active = ch[np.abs(ch) > _SILENCE_THRESHOLD]
-        if active.size == 0:
-            return 0.0
-        return float(np.sqrt(np.mean(active**2)))
-
-    return _active_rms(mic), _active_rms(system)
+    return _active_rms(stereo[:, 0]), _active_rms(stereo[:, 1])
 
 
 # ─── Audio compression ─────────────────────────────────────────────────────
