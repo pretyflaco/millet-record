@@ -66,7 +66,13 @@ _STARTUP_TIMEOUT = 10.0  # max seconds to wait for ffmpeg to produce data
 _MAX_RESTART_ATTEMPTS = 5  # max consecutive restart attempts
 _STALL_TIMEOUT = 15.0  # seconds of no file growth before declaring stall
 DRAIN_SECONDS = 10  # seconds to keep recording after user requests stop,
-# allowing ffmpeg's ~0.9x realtime pipeline to flush
+# allowing Linux ffmpeg's ~0.9x realtime pipeline to flush
+DRAIN_SECONDS_DARWIN = 1  # macOS Swift sidecar flushes in <100 ms
+
+
+def default_drain_seconds() -> int:
+    """Backend-appropriate stop drain duration (1s on macOS sidecar, 10s on Linux ffmpeg)."""
+    return DRAIN_SECONDS_DARWIN if _darwin_backend_enabled() else DRAIN_SECONDS
 
 # ── System-channel silence detection ──
 # The system-audio channel (remote participants) can go silent mid-recording

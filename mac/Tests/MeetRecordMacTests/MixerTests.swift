@@ -382,4 +382,117 @@ final class MixerTests: XCTestCase {
 
         try writer.close()
     }
+
+    /// Repeated push/pop across >4096 samples exercises the head-cursor
+    /// compaction path without losing ordering or values.
+    func testRingBufferCompactionPreservesOrder() {
+        let rb = FloatRingBuffer()
+        var nextPush: Float = 0
+        var nextExpected: Float = 0
+
+        for _ in 0..<40 {
+            let chunk = (0..<300).map { offset -> Float in
+                let v = nextPush + Float(offset)
+                return v
+            }
+            nextPush += 300
+            chunk.withUnsafeBufferPointer { ptr in
+                rb.push(ptr.baseAddress!, count: chunk.count)
+            }
+            let popped = rb.pop(maxCount: 250)
+            XCTAssertEqual(popped.count, 250)
+            for v in popped {
+                XCTAssertEqual(v, nextExpected)
+                nextExpected += 1
+            }
+        }
+
+        let rest = rb.drainAll()
+        XCTAssertEqual(rest.count, Int(nextPush - nextExpected))
+        for v in rest {
+            XCTAssertEqual(v, nextExpected)
+            nextExpected += 1
+        }
+        XCTAssertEqual(rb.available, 0)
+    }
+
+    /// When one channel outruns the other beyond `maxSkewFrames`, `drainOnce`
+    /// trims excess oldest samples so L/R sync cannot drift unboundedly.
+    func testDrainOnceTrimsExcessClockSkew() throws {
+        let url = tmpURL("skew-trim.wav")
+        let writer = try WavWriter(url: url, sampleRate: 16_000, channels: 2)
+        let mixer = Mixer(writer: writer, maxSkewFrames: 500)
+
+        let mic = [Float](repeating: 0.1, count: 100)
+        let sys = [Float](repeating: 0.2, count: 900)
+        mic.withUnsafeBufferPointer { ptr in mixer.pushMic(ptr.baseAddress!, count: mic.count) }
+        sys.withUnsafeBufferPointer { ptr in mixer.pushSystem(ptr.baseAddress!, count: sys.count) }
+
+        mixer.drainOnce()
+        mixer.waitForWritesToDrain()
+
+        XCTAssertEqual(mixer.framesEmitted, 100)
+        // 900 - 100 = 800 remaining on sys; maxSkewFrames=500 -> 300 trimmed.
+        XCTAssertEqual(mixer.driftDroppedFrames, 300)
+
+        try writer.close()
+    }
+
+    /// When the system channel is completely absent (e.g. failed tap), repeated
+    /// `drainOnce` calls must still bound the mic buffer to `maxSkewFrames`.
+    func testDrainOnceBoundsBufferWhenSystemChannelAbsent() throws {
+        let url = tmpURL("mic-only-bound.wav")
+        let writer = try WavWriter(url: url, sampleRate: 16_000, channels: 2)
+        let mixer = Mixer(writer: writer, maxSkewFrames: 500)
+
+        let micChunk = [Float](repeating: 0.25, count: 400)
+        for _ in 0..<4 {
+            micChunk.withUnsafeBufferPointer { ptr in
+                mixer.pushMic(ptr.baseAddress!, count: micChunk.count)
+            }
+            mixer.drainOnce()
+        }
+        mixer.waitForWritesToDrain()
+
+        XCTAssertEqual(mixer.framesEmitted, 0, "No system frames yet → nothing emitted")
+        // 4 * 400 = 1600 pushed; cap is 500 -> 1100 excess dropped across drains.
+        XCTAssertEqual(mixer.driftDroppedFrames, 1100)
+
+        // When system frames later arrive, at most maxSkewFrames (500) pair immediately.
+        let sys = [Float](repeating: 0.5, count: 600)
+        sys.withUnsafeBufferPointer { ptr in mixer.pushSystem(ptr.baseAddress!, count: sys.count) }
+        mixer.drainOnce()
+        mixer.waitForWritesToDrain()
+        XCTAssertEqual(mixer.framesEmitted, 500)
+
+        try writer.close()
+    }
+
+    /// Mirror of `testDrainOnceBoundsBufferWhenSystemChannelAbsent`: when the
+    /// mic channel is absent, repeated `drainOnce` calls still bound sysBuffer.
+    func testDrainOnceBoundsBufferWhenMicChannelAbsent() throws {
+        let url = tmpURL("sys-only-bound.wav")
+        let writer = try WavWriter(url: url, sampleRate: 16_000, channels: 2)
+        let mixer = Mixer(writer: writer, maxSkewFrames: 500)
+
+        let sysChunk = [Float](repeating: 0.25, count: 400)
+        for _ in 0..<4 {
+            sysChunk.withUnsafeBufferPointer { ptr in
+                mixer.pushSystem(ptr.baseAddress!, count: sysChunk.count)
+            }
+            mixer.drainOnce()
+        }
+        mixer.waitForWritesToDrain()
+
+        XCTAssertEqual(mixer.framesEmitted, 0, "No mic frames yet → nothing emitted")
+        XCTAssertEqual(mixer.driftDroppedFrames, 1100)
+
+        let mic = [Float](repeating: 0.5, count: 600)
+        mic.withUnsafeBufferPointer { ptr in mixer.pushMic(ptr.baseAddress!, count: mic.count) }
+        mixer.drainOnce()
+        mixer.waitForWritesToDrain()
+        XCTAssertEqual(mixer.framesEmitted, 500)
+
+        try writer.close()
+    }
 }

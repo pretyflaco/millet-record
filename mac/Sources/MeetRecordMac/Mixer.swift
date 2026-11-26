@@ -27,8 +27,13 @@
 import Foundation
 
 /// A simple FIFO buffer of `Float` samples with thread-safe push/pop.
+///
+/// Uses a head cursor (`head`) to avoid O(N) `removeFirst` memmoves on every
+/// 20 ms drain tick, compacting only when empty or when consumed prefix
+/// exceeds half the backing storage.
 final class FloatRingBuffer {
     private var buffer: [Float] = []
+    private var head: Int = 0
     private let lock = NSLock()
 
     /// Append samples to the tail.
@@ -36,13 +41,17 @@ final class FloatRingBuffer {
         if count <= 0 { return }
         lock.lock()
         defer { lock.unlock() }
-        // Reserve in chunks to amortize allocation cost.
+        let liveCount = buffer.count - head
         if buffer.capacity - buffer.count < count {
-            buffer.reserveCapacity(buffer.count + max(count, 4096))
+            if head > 0 && head >= liveCount {
+                buffer.removeFirst(head)
+                head = 0
+            }
+            if buffer.capacity - buffer.count < count {
+                buffer.reserveCapacity(buffer.count + max(count, 4096))
+            }
         }
-        for i in 0..<count {
-            buffer.append(src[i])
-        }
+        buffer.append(contentsOf: UnsafeBufferPointer(start: src, count: count))
     }
 
     /// Pop up to `maxCount` samples from the head. Returns the actually
@@ -51,27 +60,54 @@ final class FloatRingBuffer {
         if maxCount <= 0 { return [] }
         lock.lock()
         defer { lock.unlock() }
-        let n = min(maxCount, buffer.count)
+        let avail = buffer.count - head
+        let n = min(maxCount, avail)
         if n == 0 { return [] }
-        let slice = Array(buffer.prefix(n))
-        buffer.removeFirst(n)
+        let slice = Array(buffer[head..<(head + n)])
+        head += n
+        compactLocked()
         return slice
+    }
+
+    /// Drop up to `maxCount` oldest samples without allocating a slice.
+    @discardableResult
+    func discard(maxCount: Int) -> Int {
+        if maxCount <= 0 { return 0 }
+        lock.lock()
+        defer { lock.unlock() }
+        let avail = buffer.count - head
+        let n = min(maxCount, avail)
+        if n == 0 { return 0 }
+        head += n
+        compactLocked()
+        return n
     }
 
     /// Current count without taking samples.
     var available: Int {
         lock.lock()
         defer { lock.unlock() }
-        return buffer.count
+        return buffer.count - head
     }
 
     /// Drain everything. Returns whatever was buffered.
     func drainAll() -> [Float] {
         lock.lock()
         defer { lock.unlock() }
-        let out = buffer
+        let out = head == 0 ? buffer : Array(buffer[head..<buffer.count])
         buffer.removeAll(keepingCapacity: false)
+        head = 0
         return out
+    }
+
+    private func compactLocked() {
+        if head >= buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+            head = 0
+        } else if head >= 4096 && head * 2 >= buffer.count {
+            buffer.removeFirst(head)
+            head = 0
+        }
     }
 }
 
@@ -94,6 +130,12 @@ final class Mixer {
     /// memory bounded but large enough to amortize lock + write overhead.
     let drainIntervalMs: Int
 
+    /// Maximum tolerated excess frames buffered on one channel after pairing
+    /// (~500 ms at 16 kHz). Guards against unbounded L/R sync drift when mic
+    /// and system audio run on slightly different hardware clocks over long
+    /// meetings. Zero disables trimming.
+    let maxSkewFrames: Int
+
     // Diagnostic counters. Reads/writes are protected by `countersLock`.
     // Used by main.swift to print push/emit totals at end of run, so a
     // duration drift surfaces from logs alone instead of requiring an
@@ -104,6 +146,7 @@ final class Mixer {
     private var _framesEmitted: Int = 0
     private var _micReady: Bool = false
     private var _sysDiscardedAtMicReady: Int = 0
+    private var _driftDroppedFrames: Int = 0
 
     var micPushed: Int {
         countersLock.lock(); defer { countersLock.unlock() }
@@ -121,10 +164,15 @@ final class Mixer {
         countersLock.lock(); defer { countersLock.unlock() }
         return _sysDiscardedAtMicReady
     }
+    var driftDroppedFrames: Int {
+        countersLock.lock(); defer { countersLock.unlock() }
+        return _driftDroppedFrames
+    }
 
-    init(writer: WavWriter, drainIntervalMs: Int = 20) {
+    init(writer: WavWriter, drainIntervalMs: Int = 20, maxSkewFrames: Int = 8_000) {
         self.writer = writer
         self.drainIntervalMs = drainIntervalMs
+        self.maxSkewFrames = maxSkewFrames
     }
 
     func pushMic(_ src: UnsafePointer<Float>, count: Int) {
@@ -218,14 +266,31 @@ final class Mixer {
     func drainOnce() {
         let micAvail = micBuffer.available
         let sysAvail = sysBuffer.available
-        // Either side empty → emit nothing this tick. The faster side's
-        // samples stay buffered until the slower side catches up.
-        if micAvail == 0 || sysAvail == 0 { return }
+        if micAvail > 0 && sysAvail > 0 {
+            let n = min(micAvail, sysAvail)
+            let mic = micBuffer.pop(maxCount: n)
+            let sys = sysBuffer.pop(maxCount: n)
+            emit(micFrames: mic, sysFrames: sys)
+        }
 
-        let n = min(micAvail, sysAvail)
-        let mic = micBuffer.pop(maxCount: n)
-        let sys = sysBuffer.pop(maxCount: n)
-        emit(micFrames: mic, sysFrames: sys)
+        // Bound accumulated clock skew — including when one channel stops
+        // producing altogether — so buffered memory stays strictly capped.
+        if maxSkewFrames > 0 {
+            let excessMic = micBuffer.available - maxSkewFrames
+            if excessMic > 0 {
+                let dropped = micBuffer.discard(maxCount: excessMic)
+                countersLock.lock()
+                _driftDroppedFrames += dropped
+                countersLock.unlock()
+            }
+            let excessSys = sysBuffer.available - maxSkewFrames
+            if excessSys > 0 {
+                let dropped = sysBuffer.discard(maxCount: excessSys)
+                countersLock.lock()
+                _driftDroppedFrames += dropped
+                countersLock.unlock()
+            }
+        }
     }
 
     /// Convert the two mono streams to interleaved s16 with tanh soft-clip
