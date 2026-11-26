@@ -5,6 +5,26 @@ Notable changes per release of `millet-record` (formerly
 [`millet-pipeline`](https://github.com/pretyflaco/millet).
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.6.3 — capture reliability and performance
+
+### Improved
+
+- Add a zero-fork PCM16 WAV tail-RMS fast path for live per-channel activity
+  metering, while retaining ffmpeg fallback for compressed and non-PCM16 input.
+  Finalized containers honor their declared data size; live writers with zero,
+  sentinel, or positive-but-stale RIFF sizes use the physical audio tail instead.
+- Make the post-recording drain interval backend-aware: shorter for the native
+  macOS sidecar while preserving the Linux ffmpeg default.
+- Replace the Swift mixer's O(n) queue shifting with a head-cursor ring buffer and
+  bound mic/system skew even when one channel produces no samples at all.
+
+### Tests
+
+- Full Python matrix: **113 passed** on each supported version.
+- macOS 15 Swift build, unit tests, and silent-recording smoke test pass.
+- Release workflow uses the supported macOS 15 runner for both the sidecar build
+  and macOS wheel verification.
+
 ## v0.6.2 — no deployment- or organization-specific references
 
 * Package author is `twentyone.ist`.

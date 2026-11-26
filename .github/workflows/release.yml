@@ -38,7 +38,7 @@ on:
 jobs:
   # ─── Job 1: build the macOS arm64 binary ──────────────────────────────────
   build-mac-binary:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     defaults:
       run:
@@ -161,7 +161,7 @@ jobs:
   # ─── Job 3: install + smoke the macOS wheel on a fresh runner ────────────
   verify-mac-wheel:
     needs: build-wheels
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     steps:
       - name: Set up Python 3.12
